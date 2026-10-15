@@ -5,7 +5,7 @@ import {
   useGraphNodeCatalog,
   type GraphDefinition,
   type GraphNodePack,
-} from '@golang-io/graph-ui'
+} from '@golang-io/graph'
 import { api } from './api'
 import RunView from './RunView'
 

@@ -24,7 +24,7 @@ import {
   type GraphDefinition,
   type GraphNodePack,
   type EndpointSides,
-} from '@golang-io/graph-ui'
+} from '@golang-io/graph'
 import { api } from './api'
 
 type Props = {

@@ -1,5 +1,5 @@
 /**
- * @golang-io/graph-ui — Graph canvas kernel (xyflow + X6).
+ * @golang-io/graph — Graph canvas kernel (xyflow + X6).
  * Host pages must not import @xyflow/react or @antv/x6 directly.
  */
 export * from './node-pack'

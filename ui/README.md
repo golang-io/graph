@@ -1,6 +1,6 @@
-# @golang-io/graph-ui 接入与开发指南
+# @golang-io/graph 接入与开发指南
 
-`@golang-io/graph-ui` 是 `graph` 项目的现代化可视化图编辑与运行轨迹追踪 React 组件库。采用 **React Flow (`@xyflow/react`) + AntV X6 (`@antv/x6`)** 双渲染引擎架构，业务文档结构与 Go 后端（`graph.Graph` / `graph.UI`）完全对齐。
+`@golang-io/graph` 是 `graph` 项目的现代化可视化图编辑与运行轨迹追踪 React 组件库。采用 **React Flow (`@xyflow/react`) + AntV X6 (`@antv/x6`)** 双渲染引擎架构，业务文档结构与 Go 后端（`graph.Graph` / `graph.UI`）完全对齐。
 
 本文档面向 **开发者（人类）** 与 **AI 编码助手（AI Agents）**，提供标准化的跨工程接入规范、配置要点与核心 API 范例。
 
@@ -31,7 +31,7 @@
 3. **单向文档流与后端强契约**：
    画布编辑产出的 JSON 数据格式与 Go 端 `graph.Graph` 以及 `docs/apis/` 中的接口定义保持 100% 一致。
 4. **安全隔离原则**：
-   外部使用方仅需从包根入口导入（`import { ... } from '@golang-io/graph-ui'`），禁止直接导入 `@xyflow/react` 或 `@antv/x6` 底层对象。
+   外部使用方仅需从包根入口导入（`import { ... } from '@golang-io/graph'`），禁止直接导入 `@xyflow/react` 或 `@antv/x6` 底层对象。
 
 ---
 
@@ -61,7 +61,7 @@ workspace/
 {
   "name": "your-web-app",
   "dependencies": {
-    "@golang-io/graph-ui": "file:../golang-io-graph/ui",
+    "@golang-io/graph": "file:../golang-io-graph/ui",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "@xyflow/react": "^12.11.0",
@@ -182,7 +182,7 @@ import {
   graphDecorationNodePack,
   type GraphDefinition,
   type GraphNodePack,
-} from '@golang-io/graph-ui';
+} from '@golang-io/graph';
 
 export function WorkflowEditorPage({ graphId }: { graphId: string }) {
   const [doc, setDoc] = useState<GraphDefinition | null>(null);

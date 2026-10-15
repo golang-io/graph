@@ -76,7 +76,7 @@ import {
   type GraphViewState,
   type GraphWatchEvent,
   type RunStatus,
-} from '@golang-io/graph-ui'
+} from '@golang-io/graph'
 import { api } from './api'
 
 /** Task 终态：收到终态快照后关闭订阅。 */

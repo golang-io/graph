@@ -10,7 +10,7 @@ import type {
   GraphTaskSnapshot,
   GraphTaskSummary,
   GraphUI,
-} from '@golang-io/graph-ui'
+} from '@golang-io/graph'
 
 /** 列表响应的外层结构。 */
 type List<T> = { Data: T[] }

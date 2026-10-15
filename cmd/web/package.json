@@ -6,12 +6,12 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "postinstall": "node -e \"const fs=require('fs');const p='node_modules/@golang-io/graph-ui';if(!fs.existsSync(p)||!fs.lstatSync(p).isSymbolicLink()){console.error('postinstall: @golang-io/graph-ui must be a symlink to ../../ui (keep install-links=false in .npmrc)');process.exit(1)}\""
+    "postinstall": "node -e \"const fs=require('fs');const p='node_modules/@golang-io/graph';if(!fs.existsSync(p)||!fs.lstatSync(p).isSymbolicLink()){console.error('postinstall: @golang-io/graph must be a symlink to ../../ui (keep install-links=false in .npmrc)');process.exit(1)}\""
   },
   "dependencies": {
     "@antv/x6": "^3",
     "@dagrejs/dagre": "^3",
-    "@golang-io/graph-ui": "file:../../ui",
+    "@golang-io/graph": "file:../../ui",
     "@xyflow/react": "^12",
     "clsx": "^2",
     "lucide-react": ">=0.500.0",
