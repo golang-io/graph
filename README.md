@@ -44,6 +44,16 @@ go run ./cmd -addr :8080 -data ./.data -web ./cmd/web/dist
 
 ---
 
+## 🎨 前端 UI 画布接入 (`@golang-io/graph-ui`)
+
+本项目包含开箱即用的前端可视化工作台组件库，基于 React Flow 与 AntV X6 双渲染内核。任何外部前端工程（基于 Vite）均可直接以源码依赖形式接入，无需发布 npm：
+
+- **极简依赖**：在外部工程 `package.json` 中配置 `"@golang-io/graph-ui": "file:../path/to/graph/ui"`。
+- **单例避坑**：在外部项目的 `vite.config.ts` 中配置 `resolve: { dedupe: ['react', 'react-dom'] }`。
+- **完整指南**：详细接入步骤、最小可用代码示例与核心 API 请参阅 [前端 UI 画布接入与开发完整指南 (ui/README.md)](ui/README.md)。
+
+---
+
 ## 🧪 测试指南 (Testing Guide)
 
 本项目包含核心库、集成测试及前端 UI 画布套件，支持多种测试场景：
