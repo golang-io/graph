@@ -1,0 +1,383 @@
+/**
+ * graph-handles.css — 入边小矩形 / 出边圆点；随 Position 贴边框中线。
+ *
+ * 注意：勿对 top/left 写死 50% !important，否则 switch 多出口的 inline 偏移失效。
+ * absolute 相对 padding 边：border-2 中线 = 向外 1px。
+ */
+.react-flow__node {
+  overflow: visible !important;
+}
+
+/* 选中交互色：固定紫罗兰 #8b5cf6，不跟主题 primary（见 GRAPH_SELECTION_COLOR） */
+:root {
+  --graph-selection: #8b5cf6;
+}
+
+/* 节点卡片：中性边框。翠绿只留给运行成功，默认/悬停不再用品牌绿。 */
+.graph-node-shell {
+  overflow: visible;
+  position: relative;
+  border: 1px solid hsl(var(--border) / 0.9);
+  background: hsl(var(--card) / 0.94);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow:
+    0 1px 2px 0 rgba(0, 0, 0, 0.03),
+    0 4px 14px -2px rgba(15, 23, 42, 0.07),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.9);
+  transition: border-color 0.25s ease, border-width 0.25s ease, box-shadow 0.25s ease;
+}
+
+.graph-node-shell:hover {
+  border-color: hsl(var(--foreground) / 0.22);
+  box-shadow:
+    0 2px 8px 0 rgba(0, 0, 0, 0.04),
+    0 8px 24px -4px rgba(15, 23, 42, 0.1),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.95);
+}
+
+.dark .graph-node-shell {
+  border-color: hsl(var(--border));
+  background: hsl(var(--card) / 0.9);
+  box-shadow:
+    0 1px 3px 0 rgba(0, 0, 0, 0.35),
+    0 6px 20px -3px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.08);
+}
+
+.dark .graph-node-shell:hover {
+  border-color: hsl(var(--foreground) / 0.32);
+  box-shadow:
+    0 2px 8px 0 rgba(0, 0, 0, 0.4),
+    0 10px 28px -4px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.12);
+}
+
+/* 选中：固定紫罗兰，换主题不变。border-color 不加 !important，运行态色框仍可透出。 */
+.graph-node-shell-selected,
+.graph-node-shell.graph-node-shell-selected:hover {
+  border-color: var(--graph-selection);
+  box-shadow:
+    0 0 0 2px var(--graph-selection),
+    0 8px 24px -4px color-mix(in srgb, var(--graph-selection) 35%, transparent) !important;
+}
+
+.dark .graph-node-shell-selected,
+.dark .graph-node-shell.graph-node-shell-selected:hover {
+  border-color: var(--graph-selection);
+  box-shadow:
+    0 0 0 2px var(--graph-selection),
+    0 8px 26px -4px color-mix(in srgb, var(--graph-selection) 50%, transparent) !important;
+}
+
+.graph-agent-node.graph-agent-node-selected {
+  box-shadow:
+    0 0 0 2px var(--graph-selection),
+    0 8px 24px -12px color-mix(in srgb, var(--graph-selection) 45%, transparent);
+}
+
+/* 连线与箭头全局保障：清透中性冷灰蓝，绿色专属留给成功运行状态 */
+.react-flow__edge-path {
+  stroke: #94a3b8;
+  /* 与 GRAPH_EDGE_STROKE_WIDTH 对齐；运行态由 inline strokeWidth 覆盖 */
+  stroke-width: 1.75px;
+  transition: stroke 0.2s ease, stroke-width 0.2s ease;
+}
+
+.dark .react-flow__edge-path {
+  stroke: #71717a;
+}
+
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke: var(--graph-selection) !important;
+  /* 与 GRAPH_RUN_STROKE_WIDTH 对齐 */
+  stroke-width: 3px !important;
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--graph-selection) 50%, transparent)) !important;
+}
+
+.react-flow__arrowhead {
+  fill: #94a3b8;
+  stroke: #94a3b8;
+}
+
+.dark .react-flow__arrowhead {
+  fill: #71717a;
+  stroke: #71717a;
+}
+
+.react-flow__edge.selected .react-flow__arrowhead {
+  fill: var(--graph-selection) !important;
+  stroke: var(--graph-selection) !important;
+}
+
+.react-flow__handle.graph-handle-source {
+  width: 9px !important;
+  height: 9px !important;
+  min-width: 9px !important;
+  min-height: 9px !important;
+  border-radius: 9999px !important;
+  border: 2px solid hsl(var(--card)) !important;
+  box-shadow: 0 0 0 1px hsl(var(--border)) !important;
+  transition: background-color 0.18s ease, box-shadow 0.18s ease !important;
+}
+
+.react-flow__handle.graph-handle-target {
+  border: 1px solid hsl(var(--border) / 0.8) !important;
+  border-radius: 3px !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05) !important;
+  transition: background-color 0.18s ease !important;
+}
+
+/* —— 入边矩形：左右竖条 —— */
+.react-flow__handle-left.graph-handle-target {
+  width: 6px !important;
+  height: 14px !important;
+  min-width: 6px !important;
+  min-height: 14px !important;
+  left: -1px !important;
+  right: auto !important;
+  transform: translate(-50%, -50%) !important;
+}
+
+.react-flow__handle-right.graph-handle-target {
+  width: 6px !important;
+  height: 14px !important;
+  min-width: 6px !important;
+  min-height: 14px !important;
+  right: -1px !important;
+  left: auto !important;
+  transform: translate(50%, -50%) !important;
+}
+
+/* —— 入边矩形：上下横条 —— */
+.react-flow__handle-top.graph-handle-target {
+  width: 14px !important;
+  height: 6px !important;
+  min-width: 14px !important;
+  min-height: 6px !important;
+  top: -1px !important;
+  bottom: auto !important;
+  transform: translate(-50%, -50%) !important;
+}
+
+.react-flow__handle-bottom.graph-handle-target {
+  width: 14px !important;
+  height: 6px !important;
+  min-width: 14px !important;
+  min-height: 6px !important;
+  bottom: -1px !important;
+  top: auto !important;
+  transform: translate(-50%, 50%) !important;
+}
+
+/* —— 出边圆点：贴边（不锁 top/left 百分比，留给多出口） —— */
+.react-flow__handle-left.graph-handle-source {
+  left: -1px !important;
+  right: auto !important;
+  transform: translate(-50%, -50%) !important;
+}
+
+.react-flow__handle-right.graph-handle-source {
+  right: -1px !important;
+  left: auto !important;
+  transform: translate(50%, -50%) !important;
+}
+
+.react-flow__handle-top.graph-handle-source {
+  top: -1px !important;
+  bottom: auto !important;
+  transform: translate(-50%, -50%) !important;
+}
+
+.react-flow__handle-bottom.graph-handle-source {
+  bottom: -1px !important;
+  top: auto !important;
+  transform: translate(-50%, 50%) !important;
+}
+
+/* 节点入口断点徽标（18×18 醒目红底 + 中心白点 + 外层白环与红色呼吸光晕）：
+ * - React Flow：隐藏底层 6×14 灰色入边矩形，由入口处的断点徽标直接作为入口视觉锚点（仍保留句柄测量与连线吸附）；
+ * - AntV X6：隐藏 SVG port 图层中的默认灰色入边小圆点，透出入口处的断点徽标（仍保留 magnet 连线吸附）。 */
+@keyframes graph-bp-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 2px #ffffff,
+      0 0 0 4px rgba(239, 68, 68, 0.45),
+      0 0 12px 2px rgba(239, 68, 68, 0.8);
+  }
+  50% {
+    box-shadow:
+      0 0 0 2px #ffffff,
+      0 0 0 7px rgba(239, 68, 68, 0.22),
+      0 0 18px 4px rgba(239, 68, 68, 0.95);
+  }
+}
+
+.graph-debug-bp {
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  background: radial-gradient(circle at 35% 35%, #f87171 0%, #ef4444 55%, #dc2626 100%);
+  box-shadow:
+    0 0 0 2px #ffffff,
+    0 0 0 4px rgba(239, 68, 68, 0.45),
+    0 0 12px 2px rgba(239, 68, 68, 0.8);
+  animation: graph-bp-pulse 2.2s ease-in-out infinite;
+}
+
+.graph-debug-bp::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  border-radius: 9999px;
+  background: #ffffff;
+  transform: translate(-50%, -50%);
+}
+
+.graph-node-shell:has(> [data-debug-bp]) > .graph-handle-target,
+.graph-agent-node:has(> [data-debug-bp]) > .graph-handle-target,
+.x6-node.x6-node-has-bp .x6-port-body[port-group='in'],
+.x6-node.x6-node-has-bp .x6-port-body[port-group^='in-'],
+.x6-node:has([data-debug-bp]) .x6-port-body[port-group='in'],
+.x6-node:has([data-debug-bp]) .x6-port-body[port-group^='in-'] {
+  opacity: 0 !important;
+}
+
+@keyframes graph-node-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 14px rgba(37, 99, 235, 0);
+  }
+}
+
+.graph-node-running {
+  animation: graph-node-pulse 3s ease-in-out infinite;
+}
+
+/* —— 智能体节点：霓虹青边 + 慢速扫光（赛博电感，克制不整卡过曝） —— */
+@keyframes graph-agent-shimmer {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 200% 50%;
+  }
+}
+
+@keyframes graph-agent-core-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(0, 240, 255, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(0, 240, 255, 0);
+  }
+}
+
+.graph-agent-node {
+  position: relative;
+  /* 双层背景：内层卡片底 + 外层渐变边（需 border 透明占位，勿清零 border-width） */
+  background:
+    linear-gradient(hsl(var(--card)), hsl(var(--card))) padding-box,
+    linear-gradient(120deg, #00f0ff, #7c3aed, #00f0ff) border-box;
+  background-size: auto, 200% 200%;
+  border: 2px solid transparent;
+  box-shadow:
+    0 0 0 1px rgba(0, 240, 255, 0.12),
+    0 8px 24px -12px rgba(0, 240, 255, 0.35);
+  animation: graph-agent-shimmer 8s linear infinite;
+}
+
+.graph-agent-node::before {
+  content: '';
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background:
+    radial-gradient(ellipse 70% 90% at 12% 50%, rgba(0, 240, 255, 0.1), transparent 55%),
+    radial-gradient(ellipse 50% 80% at 92% 20%, rgba(176, 38, 255, 0.08), transparent 50%);
+}
+
+.dark .graph-agent-node {
+  box-shadow:
+    0 0 0 1px rgba(0, 240, 255, 0.2),
+    0 10px 28px -10px rgba(0, 240, 255, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.graph-agent-node.graph-node-running {
+  animation:
+    graph-agent-shimmer 8s linear infinite,
+    graph-node-pulse 3s ease-in-out infinite;
+}
+
+.graph-agent-core {
+  animation: graph-agent-core-pulse 2.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .graph-agent-node,
+  .graph-agent-node.graph-node-running,
+  .graph-agent-core,
+  .graph-debug-bp {
+    animation: none;
+  }
+}
+
+.react-flow__controls {
+  overflow: hidden;
+  border-radius: 0.75rem !important;
+  border: 1px solid hsl(var(--border)) !important;
+  background: hsl(var(--card) / 0.95) !important;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.18) !important;
+  backdrop-filter: blur(6px);
+}
+
+.react-flow__controls-button {
+  width: 28px !important;
+  height: 28px !important;
+  border: none !important;
+  border-bottom: 1px solid hsl(var(--border)) !important;
+  background: transparent !important;
+  color: hsl(var(--foreground)) !important;
+}
+
+.react-flow__controls-button:last-child {
+  border-bottom: none !important;
+}
+
+.react-flow__controls-button:hover {
+  background: hsl(var(--muted)) !important;
+}
+
+.react-flow__controls-button svg {
+  fill: currentColor !important;
+  stroke: currentColor !important;
+  max-width: 14px !important;
+  max-height: 14px !important;
+}
+
+.react-flow__controls-button:disabled {
+  opacity: 0.35 !important;
+  cursor: not-allowed !important;
+}
+
+.react-flow__minimap {
+  overflow: hidden;
+  border-radius: 0.75rem !important;
+  border: 1px solid hsl(var(--border)) !important;
+  background: hsl(var(--card) / 0.95) !important;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.18) !important;
+}
+
+.react-flow__minimap svg {
+  display: block;
+}

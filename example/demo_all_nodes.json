@@ -1,0 +1,317 @@
+{
+  "GraphID": "demo_all_nodes",
+  "Kind": "graph",
+  "Name": "Demo · 全节点串联",
+  "Description": "验证用：template→switch(IF/ELSE)→http→llm→merge→end。试跑 input：{\"name\":\"Ada\",\"score\":40}。LLM 固定输入 Query←greeting、Context←HTTP Status；请把 LLM 节点 Config.Model 的 your-model-id 换成控制台可用模型 id。score≥60（IF/true）走失败模板；score<60（ELSE/false）走 HTTP+LLM；merge 取实际执行的那一支的 result。",
+  "Graph": {
+    "Nodes": [
+      {
+        "ID": "start",
+        "Name": "开始",
+        "Kind": "__INNER__.start"
+      },
+      {
+        "ID": "greet",
+        "Name": "问候模板",
+        "Inputs": {
+          "name": {
+            "From": "$input",
+            "Field": "name"
+          },
+          "score": {
+            "From": "$input",
+            "Field": "score"
+          },
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "greeting",
+                "Value": "你好，{{name}}！当前得分 {{score}}"
+              }
+            ]
+          }
+        },
+        "Kind": "template"
+      },
+      {
+        "ID": "gate",
+        "Name": "分数门槛",
+        "Inputs": {
+          "score": {
+            "From": "$input",
+            "Field": "score"
+          },
+          "Expr": {
+            "Value": "score >= 60"
+          }
+        },
+        "Kind": "__INNER__.switch"
+      },
+      {
+        "ID": "fetch",
+        "Name": "HTTP 探测",
+        "Inputs": {
+          "name": {
+            "From": "$input",
+            "Field": "name"
+          },
+          "Method": {
+            "Value": "GET"
+          },
+          "URL": {
+            "Value": "https://httpbin.org/get?demo=graph&name={{name}}"
+          }
+        },
+        "Kind": "http"
+      },
+      {
+        "ID": "ask",
+        "Name": "LLM 点评",
+        "Inputs": {
+          "Query": {
+            "From": "greet",
+            "Field": "greeting"
+          },
+          "Context": {
+            "From": "fetch",
+            "Field": "Status"
+          },
+          "Model": {
+            "Value": "your-model-id"
+          },
+          "System": {
+            "Value": "你是简洁的中文助教，只用一句话回复。"
+          },
+          "Prompt": {
+            "Value": "根据问候「{{Query}}」和 HTTP 状态 {{Context}}，给一句点评。"
+          }
+        },
+        "Kind": "llm"
+      },
+      {
+        "ID": "ok",
+        "Name": "成功汇总",
+        "Inputs": {
+          "greeting": {
+            "From": "greet",
+            "Field": "greeting"
+          },
+          "http_status": {
+            "From": "fetch",
+            "Field": "Status"
+          },
+          "llm_text": {
+            "From": "ask",
+            "Field": "Text"
+          },
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "result",
+                "Value": "OK | {{greeting}} | http={{http_status}} | llm={{llm_text}}"
+              }
+            ]
+          }
+        },
+        "Kind": "template"
+      },
+      {
+        "ID": "fail",
+        "Name": "失败汇总",
+        "Inputs": {
+          "greeting": {
+            "From": "greet",
+            "Field": "greeting"
+          },
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "result",
+                "Value": "FAIL | {{greeting}} | score 未达标"
+              }
+            ]
+          }
+        },
+        "Kind": "template"
+      },
+      {
+        "ID": "join",
+        "Name": "汇合",
+        "Inputs": {
+          "Mode": {
+            "Value": "any"
+          },
+          "Outputs": {
+            "Value": [
+              {
+                "Name": "result",
+                "First": [
+                  {
+                    "From": "ok",
+                    "Field": "result"
+                  },
+                  {
+                    "From": "fail",
+                    "Field": "result"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "Kind": "__INNER__.merge"
+      },
+      {
+        "ID": "finish",
+        "Name": "结束",
+        "Inputs": {
+          "greeting": {
+            "From": "greet",
+            "Field": "greeting"
+          },
+          "result": {
+            "From": "join",
+            "Field": "result"
+          }
+        },
+        "Kind": "__INNER__.end"
+      }
+    ],
+    "Edges": [
+      {
+        "ID": "e_start",
+        "From": "start.Out",
+        "To": "greet.In"
+      },
+      {
+        "ID": "e2",
+        "From": "greet.Out",
+        "To": "gate.In"
+      },
+      {
+        "ID": "e3",
+        "From": "gate.Case0",
+        "To": "fail.In"
+      },
+      {
+        "ID": "e4",
+        "From": "gate.Case1",
+        "To": "fetch.In"
+      },
+      {
+        "ID": "e5",
+        "From": "fetch.Out",
+        "To": "ask.In"
+      },
+      {
+        "ID": "e6",
+        "From": "ask.Out",
+        "To": "ok.In"
+      },
+      {
+        "ID": "e7",
+        "From": "ok.Out",
+        "To": "join.In"
+      },
+      {
+        "ID": "e8",
+        "From": "fail.Out",
+        "To": "join.In"
+      },
+      {
+        "ID": "e9",
+        "From": "join.Out",
+        "To": "finish.In"
+      }
+    ],
+    "InputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {},
+        "score": {}
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "score"
+      ]
+    }
+  },
+  "UI": {
+    "Positions": {
+      "ask": {
+        "X": 1156,
+        "Y": 144
+      },
+      "fail": {
+        "X": 1448,
+        "Y": 24
+      },
+      "fetch": {
+        "X": 864,
+        "Y": 144
+      },
+      "finish": {
+        "X": 2032,
+        "Y": 84
+      },
+      "gate": {
+        "X": 572,
+        "Y": 76
+      },
+      "greet": {
+        "X": 280,
+        "Y": 84
+      },
+      "join": {
+        "X": 1740,
+        "Y": 84
+      },
+      "ok": {
+        "X": 1448,
+        "Y": 144
+      },
+      "start": {
+        "X": 40,
+        "Y": 84
+      }
+    },
+    "EndpointSides": {
+      "start": {
+        "Out": "right"
+      },
+      "greet": {
+        "In": "left",
+        "Out": "right"
+      },
+      "gate": {
+        "In": "left",
+        "Case0": "right",
+        "Case1": "right"
+      },
+      "fetch": {
+        "In": "left",
+        "Out": "right"
+      },
+      "ask": {
+        "In": "left",
+        "Out": "right"
+      },
+      "ok": {
+        "In": "left",
+        "Out": "right"
+      },
+      "fail": {
+        "In": "left",
+        "Out": "right"
+      },
+      "join": {
+        "In": "left",
+        "Out": "right"
+      },
+      "finish": {
+        "In": "left"
+      }
+    }
+  }
+}

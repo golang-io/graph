@@ -1,0 +1,123 @@
+{
+  "GraphID": "demo_code",
+  "Kind": "graph",
+  "Name": "Demo · Code 表达式",
+  "Description": "验证 code 节点：a+b、比较、字符串拼接；后面的条目可以使用前面条目的 Key。试跑 {\"a\":3,\"b\":8,\"name\":\"Ada\"}。",
+  "Graph": {
+    "Nodes": [
+      {
+        "ID": "start",
+        "Name": "开始",
+        "Kind": "__INNER__.start"
+      },
+      {
+        "ID": "calc",
+        "Name": "计算",
+        "Inputs": {
+          "a": {
+            "From": "$input",
+            "Field": "a"
+          },
+          "b": {
+            "From": "$input",
+            "Field": "b"
+          },
+          "name": {
+            "From": "$input",
+            "Field": "name"
+          },
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "total",
+                "Value": "a + b"
+              },
+              {
+                "Key": "pass",
+                "Value": "total >= 10"
+              },
+              {
+                "Key": "label",
+                "Value": "name + \":\" + string(total)"
+              }
+            ]
+          }
+        },
+        "Kind": "code"
+      },
+      {
+        "ID": "finish",
+        "Name": "结束",
+        "Inputs": {
+          "label": {
+            "From": "calc",
+            "Field": "label"
+          },
+          "pass": {
+            "From": "calc",
+            "Field": "pass"
+          },
+          "total": {
+            "From": "calc",
+            "Field": "total"
+          }
+        },
+        "Kind": "__INNER__.end"
+      }
+    ],
+    "Edges": [
+      {
+        "ID": "e_start",
+        "From": "start.Out",
+        "To": "calc.In"
+      },
+      {
+        "ID": "e2",
+        "From": "calc.Out",
+        "To": "finish.In"
+      }
+    ],
+    "InputSchema": {
+      "type": "object",
+      "properties": {
+        "a": {},
+        "b": {},
+        "name": {}
+      },
+      "additionalProperties": false,
+      "required": [
+        "a",
+        "b",
+        "name"
+      ]
+    }
+  },
+  "UI": {
+    "Positions": {
+      "calc": {
+        "X": 280,
+        "Y": 80
+      },
+      "finish": {
+        "X": 520,
+        "Y": 80
+      },
+      "start": {
+        "X": 40,
+        "Y": 80
+      }
+    },
+    "EndpointSides": {
+      "start": {
+        "Out": "right"
+      },
+      "calc": {
+        "In": "left",
+        "Out": "right"
+      },
+      "finish": {
+        "In": "left"
+      }
+    }
+  }
+}

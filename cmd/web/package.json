@@ -1,0 +1,32 @@
+{
+  "name": "graph-demo-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "postinstall": "node -e \"const fs=require('fs');const p='node_modules/@golang-io/graph-ui';if(!fs.existsSync(p)||!fs.lstatSync(p).isSymbolicLink()){console.error('postinstall: @golang-io/graph-ui must be a symlink to ../../ui (keep install-links=false in .npmrc)');process.exit(1)}\""
+  },
+  "dependencies": {
+    "@antv/x6": "^3",
+    "@dagrejs/dagre": "^3",
+    "@golang-io/graph-ui": "file:../../ui",
+    "@xyflow/react": "^12",
+    "clsx": "^2",
+    "lucide-react": ">=0.500.0",
+    "react": "^19",
+    "react-dom": "^19",
+    "tailwind-merge": "^3",
+    "tslib": "^2.8.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^5",
+    "tailwindcss": "^4",
+    "typescript": "^5.9",
+    "vite": "^7"
+  }
+}

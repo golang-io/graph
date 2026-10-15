@@ -1,0 +1,608 @@
+{
+  "GraphID": "demo_tour",
+  "Kind": "graph",
+  "Name": "Demo · 教学总览",
+  "Description": "教学示例（分区网格布局）：① 准备 → ② switch+merge(any) → ③ parallel+merge(all) → ④ map→reduce→end。注释框仅展示。试跑：{\"name\":\"Ada\",\"score\":40,\"items\":[\"a\",\"b\",\"c\"]}。期望：tag=lo，lane=lo|Ada，opt/pess 两路都有，acc=abc。",
+  "Graph": {
+    "Nodes": [
+      {
+        "ID": "start",
+        "Name": "开始",
+        "Kind": "__INNER__.start"
+      },
+      {
+        "ID": "greet",
+        "Name": "入学问候",
+        "Inputs": {
+          "name": {
+            "From": "$input",
+            "Field": "name"
+          },
+          "score": {
+            "From": "$input",
+            "Field": "score"
+          },
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "greeting",
+                "Value": "你好，{{name}}！得分 {{score}}"
+              }
+            ]
+          }
+        },
+        "Kind": "template"
+      },
+      {
+        "ID": "gate",
+        "Name": "分数门槛",
+        "Inputs": {
+          "score": {
+            "From": "$input",
+            "Field": "score"
+          },
+          "Expr": {
+            "Value": "score >= 60"
+          }
+        },
+        "Kind": "__INNER__.switch"
+      },
+      {
+        "ID": "hi",
+        "Name": "高分支",
+        "Inputs": {
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "tag",
+                "Value": "hi"
+              }
+            ]
+          }
+        },
+        "Kind": "template"
+      },
+      {
+        "ID": "lo",
+        "Name": "低分支",
+        "Inputs": {
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "tag",
+                "Value": "lo"
+              }
+            ]
+          }
+        },
+        "Kind": "template"
+      },
+      {
+        "ID": "join_sw",
+        "Name": "分支汇合",
+        "Inputs": {
+          "Mode": {
+            "Value": "any"
+          },
+          "Outputs": {
+            "Value": [
+              {
+                "Name": "tag",
+                "First": [
+                  {
+                    "From": "hi",
+                    "Field": "tag"
+                  },
+                  {
+                    "From": "lo",
+                    "Field": "tag"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "Kind": "__INNER__.merge"
+      },
+      {
+        "ID": "mark",
+        "Name": "拼车道标记",
+        "Inputs": {
+          "name": {
+            "From": "$input",
+            "Field": "name"
+          },
+          "tag": {
+            "From": "join_sw",
+            "Field": "tag"
+          },
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "lane",
+                "Value": "tag + \"|\" + name"
+              }
+            ]
+          }
+        },
+        "Kind": "code"
+      },
+      {
+        "ID": "fan",
+        "Name": "并行分叉",
+        "Kind": "__INNER__.parallel"
+      },
+      {
+        "ID": "opt",
+        "Name": "乐观侧写",
+        "Inputs": {
+          "greeting": {
+            "From": "greet",
+            "Field": "greeting"
+          },
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "opt",
+                "Value": "乐观：{{greeting}}"
+              }
+            ]
+          }
+        },
+        "Kind": "template"
+      },
+      {
+        "ID": "pess",
+        "Name": "审慎侧写",
+        "Inputs": {
+          "tag": {
+            "From": "join_sw",
+            "Field": "tag"
+          },
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "pess",
+                "Value": "审慎：{{tag}}"
+              }
+            ]
+          }
+        },
+        "Kind": "template"
+      },
+      {
+        "ID": "join_par",
+        "Name": "并行齐汇",
+        "Inputs": {
+          "Mode": {
+            "Value": "all"
+          }
+        },
+        "Kind": "__INNER__.merge"
+      },
+      {
+        "ID": "lp",
+        "Name": "遍历 items",
+        "Inputs": {
+          "List": {
+            "From": "$input",
+            "Field": "items"
+          },
+          "Chunk": {
+            "Value": 1
+          },
+          "MaxParallel": {
+            "Value": 1
+          },
+          "Body": {
+            "Value": {
+              "Nodes": [
+                {
+                  "ID": "start",
+                  "Name": "开始",
+                  "Kind": "__INNER__.start"
+                },
+                {
+                  "ID": "body",
+                  "Name": "单项",
+                  "Inputs": {
+                    "item": {
+                      "From": "$input",
+                      "Field": "Item"
+                    },
+                    "Outputs": {
+                      "Value": [
+                        {
+                          "Key": "piece",
+                          "Value": "{{item}}"
+                        }
+                      ]
+                    }
+                  },
+                  "Kind": "template"
+                },
+                {
+                  "ID": "end",
+                  "Name": "结束",
+                  "Inputs": {
+                    "piece": {
+                      "From": "body",
+                      "Field": "piece"
+                    }
+                  },
+                  "Kind": "__INNER__.end"
+                }
+              ],
+              "Edges": [
+                {
+                  "ID": "b1",
+                  "From": "start.Out",
+                  "To": "body.In"
+                },
+                {
+                  "ID": "b2",
+                  "From": "body.Out",
+                  "To": "end.In"
+                }
+              ],
+              "InputSchema": {
+                "type": "object",
+                "properties": {
+                  "Item": {}
+                },
+                "additionalProperties": false,
+                "required": [
+                  "Item"
+                ]
+              }
+            }
+          }
+        },
+        "Kind": "__INNER__.map"
+      },
+      {
+        "ID": "concat",
+        "Name": "拼接",
+        "Inputs": {
+          "List": {
+            "From": "lp",
+            "Field": "Results"
+          },
+          "Init": {
+            "Value": "\"\""
+          },
+          "Expr": {
+            "Value": "Acc + Item.piece"
+          }
+        },
+        "Kind": "reduce"
+      },
+      {
+        "ID": "finish",
+        "Name": "结束",
+        "Inputs": {
+          "acc": {
+            "From": "concat",
+            "Field": "Result"
+          },
+          "greeting": {
+            "From": "greet",
+            "Field": "greeting"
+          },
+          "lane": {
+            "From": "mark",
+            "Field": "lane"
+          },
+          "opt": {
+            "From": "opt",
+            "Field": "opt"
+          },
+          "pess": {
+            "From": "pess",
+            "Field": "pess"
+          },
+          "tag": {
+            "From": "join_sw",
+            "Field": "tag"
+          }
+        },
+        "Kind": "__INNER__.end"
+      }
+    ],
+    "Edges": [
+      {
+        "ID": "e_start",
+        "From": "start.Out",
+        "To": "greet.In"
+      },
+      {
+        "ID": "e2",
+        "From": "greet.Out",
+        "To": "gate.In"
+      },
+      {
+        "ID": "e3",
+        "From": "gate.Case0",
+        "To": "hi.In"
+      },
+      {
+        "ID": "e4",
+        "From": "gate.Case1",
+        "To": "lo.In"
+      },
+      {
+        "ID": "e5",
+        "From": "hi.Out",
+        "To": "join_sw.In"
+      },
+      {
+        "ID": "e6",
+        "From": "lo.Out",
+        "To": "join_sw.In"
+      },
+      {
+        "ID": "e7",
+        "From": "join_sw.Out",
+        "To": "mark.In"
+      },
+      {
+        "ID": "e8",
+        "From": "mark.Out",
+        "To": "fan.In"
+      },
+      {
+        "ID": "e9",
+        "From": "fan.Out",
+        "To": "opt.In"
+      },
+      {
+        "ID": "e10",
+        "From": "fan.Out",
+        "To": "pess.In"
+      },
+      {
+        "ID": "e11",
+        "From": "opt.Out",
+        "To": "join_par.In"
+      },
+      {
+        "ID": "e12",
+        "From": "pess.Out",
+        "To": "join_par.In"
+      },
+      {
+        "ID": "e13",
+        "From": "join_par.Out",
+        "To": "lp.In"
+      },
+      {
+        "ID": "e16",
+        "From": "lp.Out",
+        "To": "concat.In"
+      },
+      {
+        "ID": "e17",
+        "From": "concat.Out",
+        "To": "finish.In"
+      }
+    ],
+    "InputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {},
+        "score": {},
+        "items": {}
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "score",
+        "items"
+      ]
+    }
+  },
+  "UI": {
+    "EdgeRails": {
+      "e8": "bottom"
+    },
+    "ExecutionMode": "parallel",
+    "StickyNotes": [
+      {
+        "Color": "#64748b",
+        "Height": 100,
+        "ID": "ann_overview",
+        "Note": "读图顺序：上左→上右→下左→下右。多条命中出边全部处理；互斥分支只走命中线；serial / parallel 只决定调度方式。",
+        "Title": "Demo · 教学总览",
+        "Width": 1780,
+        "X": 40,
+        "Y": -40.13862751123255
+      },
+      {
+        "Color": "#22c55e",
+        "Height": 260,
+        "ID": "ann_prep",
+        "Note": "入口节点读取运行输入 name、score，写出 greeting；下游节点通过输入引用读取它。",
+        "Title": "① 准备",
+        "Width": 540,
+        "X": 40,
+        "Y": 123.94221362190538
+      },
+      {
+        "Color": "#3b82f6",
+        "Height": 360,
+        "ID": "ann_branch",
+        "Note": "switch 的 IF/ELSE 只走一路；殊途同归用 merge(any)，并由 merge 的 First 取实际执行那一支的 tag。code 拼 lane 供下游使用。",
+        "Title": "② 互斥分支",
+        "Width": 1200,
+        "X": 620,
+        "Y": 73.94221362190538
+      },
+      {
+        "Color": "#8b5cf6",
+        "Height": 460,
+        "ID": "ann_parallel",
+        "Note": "必须用 parallel fork；两路同时跑；齐汇用 merge(all)。serial 模式会直接失败。",
+        "Title": "③ 拓扑并行",
+        "Width": 840,
+        "X": 40,
+        "Y": 448.0230547550433
+      },
+      {
+        "Color": "#06b6d4",
+        "Height": 460,
+        "ID": "ann_loop",
+        "Note": "map 是容器节点：循环体是参数 Body 中的内嵌子图，每项 Item 运行一次（一个子任务）。全部完成后 map 输出 Results（每轮循环体 end 的输出），reduce 把它拼成 acc。",
+        "Title": "④ 列表循环 · 收口",
+        "Width": 900,
+        "X": 920,
+        "Y": 448.0230547550433
+      }
+    ],
+    "EndpointSides": {
+      "start": {
+        "Out": "right"
+      },
+      "greet": {
+        "In": "left",
+        "Out": "right"
+      },
+      "gate": {
+        "In": "left",
+        "Case0": "right",
+        "Case1": "right"
+      },
+      "hi": {
+        "In": "left",
+        "Out": "right"
+      },
+      "lo": {
+        "In": "left",
+        "Out": "right"
+      },
+      "join_sw": {
+        "In": "left",
+        "Out": "right"
+      },
+      "mark": {
+        "In": "left",
+        "Out": "bottom"
+      },
+      "fan": {
+        "In": "top",
+        "Out": "right"
+      },
+      "opt": {
+        "In": "left",
+        "Out": "right"
+      },
+      "pess": {
+        "In": "left",
+        "Out": "right"
+      },
+      "join_par": {
+        "In": "left",
+        "Out": "right"
+      },
+      "lp": {
+        "In": "left",
+        "Out": "right"
+      },
+      "concat": {
+        "In": "left",
+        "Out": "right"
+      },
+      "finish": {
+        "In": "left"
+      }
+    },
+    "Positions": {
+      "concat": {
+        "X": 1452,
+        "Y": 760
+      },
+      "fan": {
+        "X": 280,
+        "Y": 640
+      },
+      "finish": {
+        "X": 1732,
+        "Y": 760
+      },
+      "gate": {
+        "X": 892,
+        "Y": 214
+      },
+      "greet": {
+        "X": 280,
+        "Y": 226
+      },
+      "hi": {
+        "X": 1172,
+        "Y": 100
+      },
+      "join_par": {
+        "X": 832,
+        "Y": 640
+      },
+      "join_sw": {
+        "X": 1452,
+        "Y": 214
+      },
+      "lo": {
+        "X": 1172,
+        "Y": 340
+      },
+      "lp": {
+        "X": 1172,
+        "Y": 640
+      },
+      "mark": {
+        "X": 1732,
+        "Y": 226
+      },
+      "opt": {
+        "X": 552,
+        "Y": 520
+      },
+      "pess": {
+        "X": 552,
+        "Y": 760
+      },
+      "start": {
+        "X": 40,
+        "Y": 226
+      }
+    },
+    "SubLayouts": {
+      "lp": {
+        "Collapsed": true,
+        "Positions": {
+          "start": {
+            "X": 24,
+            "Y": 80
+          },
+          "body": {
+            "X": 212,
+            "Y": 80
+          },
+          "end": {
+            "X": 472,
+            "Y": 80
+          }
+        },
+        "EndpointSides": {
+          "start": {
+            "Out": "right"
+          },
+          "body": {
+            "In": "left",
+            "Out": "right"
+          },
+          "end": {
+            "In": "left"
+          }
+        }
+      }
+    }
+  }
+}

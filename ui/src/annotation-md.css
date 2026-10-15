@@ -1,0 +1,70 @@
+/**
+ * 注释框说明的紧凑 Markdown。不套 chat 的 prose，避免画布里字号过大。
+ */
+.ann-md {
+  color: hsl(var(--muted-foreground));
+  font-size: 10px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.ann-md > :first-child {
+  margin-top: 0;
+}
+
+.ann-md > :last-child {
+  margin-bottom: 0;
+}
+
+.ann-md p,
+.ann-md ul,
+.ann-md ol,
+.ann-md pre,
+.ann-md blockquote {
+  margin: 0.35em 0;
+}
+
+.ann-md h1,
+.ann-md h2,
+.ann-md h3,
+.ann-md h4 {
+  margin: 0.5em 0 0.2em;
+  color: hsl(var(--foreground));
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.ann-md ul,
+.ann-md ol {
+  padding-left: 1.2em;
+}
+
+.ann-md code {
+  border-radius: 3px;
+  background: hsl(var(--muted));
+  padding: 0 0.25em;
+  font-size: 9px;
+}
+
+.ann-md pre {
+  overflow: auto;
+  border-radius: 4px;
+  background: hsl(var(--muted));
+  padding: 0.4em 0.5em;
+}
+
+.ann-md pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.ann-md a {
+  color: hsl(var(--primary));
+  text-decoration: underline;
+}
+
+.ann-md img {
+  max-width: 100%;
+  height: auto;
+}

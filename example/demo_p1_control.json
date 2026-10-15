@@ -1,0 +1,281 @@
+{
+  "GraphID": "demo_p1_control",
+  "Kind": "graph",
+  "Name": "Demo · P1 错误/等待/子流",
+  "Description": "验证 stop_error 的 Error 出口与 subgraph。试跑：{\"name\":\"Ada\",\"force_fail\":1} 走错误恢复（读取 boom 的 Error 输出）；force_fail:0 则调用子流。两路都输出 result 与 sub，由 merge 取实际执行的那一支。",
+  "Graph": {
+    "Nodes": [
+      {
+        "ID": "start",
+        "Name": "开始",
+        "Kind": "__INNER__.start"
+      },
+      {
+        "ID": "gate",
+        "Name": "是否强制失败",
+        "Inputs": {
+          "force_fail": {
+            "From": "$input",
+            "Field": "force_fail"
+          },
+          "Expr": {
+            "Value": "force_fail >= 1"
+          }
+        },
+        "Kind": "__INNER__.switch"
+      },
+      {
+        "ID": "boom",
+        "Name": "停止报错",
+        "Inputs": {
+          "name": {
+            "From": "$input",
+            "Field": "name"
+          },
+          "Message": {
+            "Value": "forced fail for {{name}}"
+          }
+        },
+        "Kind": "__INNER__.stop_error"
+      },
+      {
+        "ID": "recover",
+        "Name": "错误恢复",
+        "Inputs": {
+          "error": {
+            "From": "boom",
+            "Field": "Error"
+          },
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "result",
+                "Value": "\"recovered:\" + error"
+              },
+              {
+                "Key": "sub",
+                "Value": "nil"
+              }
+            ]
+          }
+        },
+        "Kind": "code"
+      },
+      {
+        "ID": "call",
+        "Name": "调用 Echo",
+        "Inputs": {
+          "name": {
+            "From": "$input",
+            "Field": "name"
+          },
+          "GraphID": {
+            "Value": "demo_child_echo"
+          }
+        },
+        "Kind": "__INNER__.subgraph"
+      },
+      {
+        "ID": "ok",
+        "Name": "成功汇总",
+        "Inputs": {
+          "output": {
+            "From": "call",
+            "Field": "Output"
+          },
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "result",
+                "Value": "\"ok\""
+              },
+              {
+                "Key": "sub",
+                "Value": "output"
+              }
+            ]
+          }
+        },
+        "Kind": "code"
+      },
+      {
+        "ID": "join",
+        "Name": "任一路完成",
+        "Inputs": {
+          "Mode": {
+            "Value": "any"
+          },
+          "Outputs": {
+            "Value": [
+              {
+                "Name": "result",
+                "First": [
+                  {
+                    "From": "recover",
+                    "Field": "result"
+                  },
+                  {
+                    "From": "ok",
+                    "Field": "result"
+                  }
+                ]
+              },
+              {
+                "Name": "sub",
+                "First": [
+                  {
+                    "From": "recover",
+                    "Field": "sub"
+                  },
+                  {
+                    "From": "ok",
+                    "Field": "sub"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "Kind": "__INNER__.merge"
+      },
+      {
+        "ID": "finish",
+        "Name": "结束",
+        "Inputs": {
+          "result": {
+            "From": "join",
+            "Field": "result"
+          },
+          "sub": {
+            "From": "join",
+            "Field": "sub"
+          }
+        },
+        "Kind": "__INNER__.end"
+      }
+    ],
+    "Edges": [
+      {
+        "ID": "e_start",
+        "From": "start.Out",
+        "To": "gate.In"
+      },
+      {
+        "ID": "e2",
+        "From": "gate.Case0",
+        "To": "boom.In"
+      },
+      {
+        "ID": "e3",
+        "From": "gate.Case1",
+        "To": "call.In"
+      },
+      {
+        "ID": "e4",
+        "From": "boom.Error",
+        "To": "recover.In"
+      },
+      {
+        "ID": "e5",
+        "From": "recover.Out",
+        "To": "join.In"
+      },
+      {
+        "ID": "e7",
+        "From": "call.Out",
+        "To": "ok.In"
+      },
+      {
+        "ID": "e8",
+        "From": "ok.Out",
+        "To": "join.In"
+      },
+      {
+        "ID": "e9",
+        "From": "join.Out",
+        "To": "finish.In"
+      }
+    ],
+    "InputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {},
+        "force_fail": {}
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "force_fail"
+      ]
+    }
+  },
+  "UI": {
+    "Positions": {
+      "boom": {
+        "X": 520,
+        "Y": 40
+      },
+      "call": {
+        "X": 780,
+        "Y": 200
+      },
+      "finish": {
+        "X": 1560,
+        "Y": 108
+      },
+      "gate": {
+        "X": 260,
+        "Y": 112
+      },
+      "join": {
+        "X": 1300,
+        "Y": 108
+      },
+      "ok": {
+        "X": 1040,
+        "Y": 200
+      },
+      "recover": {
+        "X": 780,
+        "Y": 40
+      },
+      "start": {
+        "X": 20,
+        "Y": 112
+      }
+    },
+    "EndpointSides": {
+      "start": {
+        "Out": "right"
+      },
+      "gate": {
+        "In": "left",
+        "Case0": "right",
+        "Case1": "right"
+      },
+      "boom": {
+        "In": "left",
+        "Error": "right"
+      },
+      "recover": {
+        "In": "left",
+        "Out": "right"
+      },
+      "call": {
+        "In": "left",
+        "Out": "right"
+      },
+      "ok": {
+        "In": "left",
+        "Out": "right"
+      },
+      "join": {
+        "In": "left",
+        "Out": "right"
+      },
+      "finish": {
+        "In": "left"
+      }
+    }
+  }
+}

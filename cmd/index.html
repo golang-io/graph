@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>graph demo</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; padding: 24px; font: 14px/1.5 system-ui, sans-serif; }
+  h1 { font-size: 18px; margin: 0 0 16px; }
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  select, button, textarea { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid #8884; }
+  textarea { width: 100%; height: 80px; font-family: ui-monospace, monospace; resize: vertical; }
+  button { cursor: pointer; }
+  .card { border: 1px solid #8884; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+  .status { font-weight: 600; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-all; font-family: ui-monospace, monospace; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #8883; }
+  .err { color: #c0392b; }
+</style>
+</head>
+<body>
+<h1>graph demo</h1>
+
+<div class="card">
+  <div class="row">
+    <select id="graph"></select>
+    <select id="engine"></select>
+    <button id="run">运行</button>
+  </div>
+  <textarea id="input">{}</textarea>
+</div>
+
+<div class="card">
+  <div>task: <span id="runId">-</span> · status: <span class="status" id="status">-</span></div>
+  <div id="error" class="err"></div>
+  <pre id="output"></pre>
+</div>
+
+<div class="card">
+  <table>
+    <thead><tr><th>#</th><th>NodeID</th><th>NodeType</th><th>Status</th><th>Error</th></tr></thead>
+    <tbody id="steps"></tbody>
+  </table>
+</div>
+
+<script>
+// 键名与服务端 Go 字段一致（大驼峰）；列表响应为 {Data}，错误响应为 {Error, Code}。
+const $ = id => document.getElementById(id);
+const terminal = new Set(["SUCCEEDED", "FAILED", "CANCELED"]);
+const esc = v => String(v ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+
+async function failText(res) {
+  const text = await res.text();
+  try { const b = JSON.parse(text); return b.Code ? `${b.Code}: ${b.Error}` : (b.Error || text); } catch { return text; }
+}
+
+async function loadGraphs() {
+  const list = (await (await fetch("/api/graphs")).json()).Data;
+  $("graph").innerHTML = list.map(g => `<option value="${esc(g.GraphID)}">${esc(g.Name)} (${esc(g.GraphID)})</option>`).join("");
+  const engines = (await (await fetch("/api/engines")).json()).Data;
+  $("engine").innerHTML = engines.map(k => `<option value="${esc(k)}">${esc(k)}</option>`).join("");
+}
+
+async function poll(taskID) {
+  const res = await fetch(`/api/tasks/${encodeURIComponent(taskID)}`);
+  if (!res.ok) { $("error").textContent = await failText(res); return; }
+  const snap = await res.json();
+  $("status").textContent = snap.Task.Status;
+  $("error").textContent = snap.Task.Error || "";
+  $("output").textContent = snap.Task.Output ? JSON.stringify(snap.Task.Output, null, 2) : "";
+  $("steps").innerHTML = (snap.Trace || []).map((s, i) =>
+    `<tr><td>${i + 1}</td><td>${esc(s.NodeID)}</td><td>${esc(s.NodeType)}</td><td>${esc(s.Status)}</td><td class="err">${esc(s.Error)}</td></tr>`
+  ).join("");
+  if (!terminal.has(snap.Task.Status)) setTimeout(() => poll(taskID), 500);
+}
+
+$("run").onclick = async () => {
+  $("error").textContent = "";
+  const res = await fetch("/api/tasks", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      GraphID: $("graph").value,
+      Engine: $("engine").value,
+      Input: JSON.parse($("input").value || "{}"),
+    }),
+  });
+  if (!res.ok) { $("error").textContent = await failText(res); return; }
+  const receipt = await res.json();
+  $("runId").textContent = receipt.TaskID;
+  $("status").textContent = "RUNNING";
+  poll(receipt.TaskID);
+};
+
+loadGraphs();
+</script>
+</body>
+</html>

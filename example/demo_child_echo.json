@@ -1,0 +1,95 @@
+{
+  "GraphID": "demo_child_echo",
+  "Kind": "graph",
+  "Name": "Demo · 子图 Echo",
+  "Description": "被 subgraph 调用：template→end。input: {\"name\":\"Ada\"}",
+  "Graph": {
+    "Nodes": [
+      {
+        "ID": "start",
+        "Name": "开始",
+        "Kind": "__INNER__.start"
+      },
+      {
+        "ID": "echo",
+        "Name": "回声",
+        "Inputs": {
+          "name": {
+            "From": "$input",
+            "Field": "name"
+          },
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "greet",
+                "Value": "echo:{{name}}"
+              }
+            ]
+          }
+        },
+        "Kind": "template"
+      },
+      {
+        "ID": "finish",
+        "Name": "结束",
+        "Inputs": {
+          "greet": {
+            "From": "echo",
+            "Field": "greet"
+          }
+        },
+        "Kind": "__INNER__.end"
+      }
+    ],
+    "Edges": [
+      {
+        "ID": "e_start",
+        "From": "start.Out",
+        "To": "echo.In"
+      },
+      {
+        "ID": "e2",
+        "From": "echo.Out",
+        "To": "finish.In"
+      }
+    ],
+    "InputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {}
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    }
+  },
+  "UI": {
+    "Positions": {
+      "echo": {
+        "X": 280,
+        "Y": 80
+      },
+      "finish": {
+        "X": 520,
+        "Y": 80
+      },
+      "start": {
+        "X": 40,
+        "Y": 80
+      }
+    },
+    "EndpointSides": {
+      "start": {
+        "Out": "right"
+      },
+      "echo": {
+        "In": "left",
+        "Out": "right"
+      },
+      "finish": {
+        "In": "left"
+      }
+    }
+  }
+}

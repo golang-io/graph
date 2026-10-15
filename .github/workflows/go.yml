@@ -1,0 +1,96 @@
+# This workflow will build and test the Go packages and UI canvas in the graph repository.
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
+
+name: Go
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+# Restrict GITHUB_TOKEN to least privilege required by this workflow.
+# 仅授予本流水线所需的最小权限，满足 CodeQL actions/missing-workflow-permissions。
+permissions:
+  contents: read
+
+jobs:
+
+  build:
+    name: Go (Build & Test)
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: 'go.mod'
+        check-latest: true
+
+    - name: Verify modules
+      run: |
+        go mod verify
+        cd test && go mod verify
+        cd ../cmd && go mod verify
+
+    - name: Build
+      run: |
+        echo "==> Building root module packages..."
+        go build -v ./...
+        echo "==> Building cmd module binaries..."
+        (cd cmd && go build -v ./...)
+        echo "==> Verifying test module compilation..."
+        (cd test && go test -run=^$ ./...)
+
+    - name: Benchmark
+      run: |
+        echo "==> Running benchmarks on root module..."
+        go test -race -run=^$ -bench=. -benchmem ./...
+
+    - name: Test (Unit & Integration with Coverage)
+      run: |
+        echo "==> Running root module tests with race detection and coverage..."
+        go test -failfast -p 1 -v -race -coverprofile=coverage-root.txt -covermode=atomic ./...
+
+        echo "==> Running test module tests (engine/api/service integration)..."
+        (cd test && go test -failfast -p 1 -v -race -coverpkg=github.com/golang-io/graph/... -coverprofile=coverage-test.txt -covermode=atomic ./...)
+
+        echo "==> Generating HTML coverage report..."
+        go tool cover -html=coverage-root.txt -o coverage-root.html
+
+    - name: Upload coverage reports to Codecov
+      uses: codecov/codecov-action@v5
+      with:
+        files: coverage-root.txt,test/coverage-test.txt
+        fail_ci_if_error: false
+
+  ui:
+    name: UI (Typecheck & Test)
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: 'npm'
+        cache-dependency-path: ui/package-lock.json
+
+    - name: Install UI dependencies
+      run: |
+        cd ui
+        npm ci
+
+    - name: UI Typecheck
+      run: |
+        cd ui
+        npm run typecheck
+
+    - name: UI Unit Tests
+      run: |
+        cd ui
+        npm test

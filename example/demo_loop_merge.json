@@ -1,0 +1,348 @@
+{
+  "GraphID": "demo_loop_merge",
+  "Kind": "graph",
+  "Name": "Demo · Merge + Map + Reduce",
+  "Description": "验证用：switch 两路汇入 merge（取实际执行那一支的 tag），再对 items 做 Map（循环体是 lp 参数 Body 中的内嵌子图），最后用 Reduce 拼接每轮结果。试跑 input：{\"score\":40,\"items\":[\"a\",\"b\",\"c\"]}。score≥60 走 hi 模板，否则 lo；期望 acc=abc。",
+  "Graph": {
+    "Nodes": [
+      {
+        "ID": "start",
+        "Name": "开始",
+        "Kind": "__INNER__.start"
+      },
+      {
+        "ID": "gate",
+        "Name": "分数门槛",
+        "Inputs": {
+          "score": {
+            "From": "$input",
+            "Field": "score"
+          },
+          "Expr": {
+            "Value": "score >= 60"
+          }
+        },
+        "Kind": "__INNER__.switch"
+      },
+      {
+        "ID": "hi",
+        "Name": "高分支",
+        "Inputs": {
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "tag",
+                "Value": "hi"
+              }
+            ]
+          }
+        },
+        "Kind": "template"
+      },
+      {
+        "ID": "lo",
+        "Name": "低分支",
+        "Inputs": {
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "tag",
+                "Value": "lo"
+              }
+            ]
+          }
+        },
+        "Kind": "template"
+      },
+      {
+        "ID": "join",
+        "Name": "汇合",
+        "Inputs": {
+          "Mode": {
+            "Value": "any"
+          },
+          "Outputs": {
+            "Value": [
+              {
+                "Name": "tag",
+                "First": [
+                  {
+                    "From": "hi",
+                    "Field": "tag"
+                  },
+                  {
+                    "From": "lo",
+                    "Field": "tag"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "Kind": "__INNER__.merge"
+      },
+      {
+        "ID": "lp",
+        "Name": "循环 items",
+        "Inputs": {
+          "List": {
+            "From": "$input",
+            "Field": "items"
+          },
+          "Chunk": {
+            "Value": 1
+          },
+          "Body": {
+            "Value": {
+              "Nodes": [
+                {
+                  "ID": "start",
+                  "Name": "开始",
+                  "Kind": "__INNER__.start"
+                },
+                {
+                  "ID": "body",
+                  "Name": "单项",
+                  "Inputs": {
+                    "item": {
+                      "From": "$input",
+                      "Field": "Item"
+                    },
+                    "Outputs": {
+                      "Value": [
+                        {
+                          "Key": "piece",
+                          "Value": "{{item}}"
+                        }
+                      ]
+                    }
+                  },
+                  "Kind": "template"
+                },
+                {
+                  "ID": "end",
+                  "Name": "结束",
+                  "Inputs": {
+                    "piece": {
+                      "From": "body",
+                      "Field": "piece"
+                    }
+                  },
+                  "Kind": "__INNER__.end"
+                }
+              ],
+              "Edges": [
+                {
+                  "ID": "b1",
+                  "From": "start.Out",
+                  "To": "body.In"
+                },
+                {
+                  "ID": "b2",
+                  "From": "body.Out",
+                  "To": "end.In"
+                }
+              ],
+              "InputSchema": {
+                "type": "object",
+                "properties": {
+                  "Item": {}
+                },
+                "additionalProperties": false,
+                "required": [
+                  "Item"
+                ]
+              }
+            }
+          }
+        },
+        "Kind": "__INNER__.map"
+      },
+      {
+        "ID": "concat",
+        "Name": "拼接",
+        "Inputs": {
+          "List": {
+            "From": "lp",
+            "Field": "Results"
+          },
+          "Init": {
+            "Value": "\"\""
+          },
+          "Expr": {
+            "Value": "Acc + Item.piece"
+          }
+        },
+        "Kind": "reduce"
+      },
+      {
+        "ID": "finish",
+        "Name": "结束",
+        "Inputs": {
+          "acc": {
+            "From": "concat",
+            "Field": "Result"
+          },
+          "tag": {
+            "From": "join",
+            "Field": "tag"
+          }
+        },
+        "Kind": "__INNER__.end"
+      }
+    ],
+    "Edges": [
+      {
+        "ID": "e_start",
+        "From": "start.Out",
+        "To": "gate.In"
+      },
+      {
+        "ID": "e2",
+        "From": "gate.Case0",
+        "To": "hi.In"
+      },
+      {
+        "ID": "e3",
+        "From": "gate.Case1",
+        "To": "lo.In"
+      },
+      {
+        "ID": "e4",
+        "From": "hi.Out",
+        "To": "join.In"
+      },
+      {
+        "ID": "e5",
+        "From": "lo.Out",
+        "To": "join.In"
+      },
+      {
+        "ID": "e6",
+        "From": "join.Out",
+        "To": "lp.In"
+      },
+      {
+        "ID": "e9",
+        "From": "lp.Out",
+        "To": "concat.In"
+      },
+      {
+        "ID": "e10",
+        "From": "concat.Out",
+        "To": "finish.In"
+      }
+    ],
+    "InputSchema": {
+      "type": "object",
+      "properties": {
+        "score": {},
+        "items": {}
+      },
+      "additionalProperties": false,
+      "required": [
+        "score",
+        "items"
+      ]
+    }
+  },
+  "UI": {
+    "Positions": {
+      "concat": {
+        "X": 1744,
+        "Y": 172
+      },
+      "finish": {
+        "X": 2004,
+        "Y": 172
+      },
+      "gate": {
+        "X": 260,
+        "Y": 108
+      },
+      "hi": {
+        "X": 520,
+        "Y": 40
+      },
+      "join": {
+        "X": 780,
+        "Y": 108
+      },
+      "lo": {
+        "X": 520,
+        "Y": 200
+      },
+      "lp": {
+        "X": 1040,
+        "Y": 108
+      },
+      "start": {
+        "X": 20,
+        "Y": 108
+      }
+    },
+    "SubLayouts": {
+      "lp": {
+        "Positions": {
+          "start": {
+            "X": 24,
+            "Y": 80
+          },
+          "body": {
+            "X": 212,
+            "Y": 80
+          },
+          "end": {
+            "X": 472,
+            "Y": 80
+          }
+        },
+        "EndpointSides": {
+          "start": {
+            "Out": "right"
+          },
+          "body": {
+            "In": "left",
+            "Out": "right"
+          },
+          "end": {
+            "In": "left"
+          }
+        }
+      }
+    },
+    "EndpointSides": {
+      "start": {
+        "Out": "right"
+      },
+      "gate": {
+        "In": "left",
+        "Case0": "right",
+        "Case1": "right"
+      },
+      "hi": {
+        "In": "left",
+        "Out": "right"
+      },
+      "lo": {
+        "In": "left",
+        "Out": "right"
+      },
+      "join": {
+        "In": "left",
+        "Out": "right"
+      },
+      "lp": {
+        "In": "left",
+        "Out": "right"
+      },
+      "concat": {
+        "In": "left",
+        "Out": "right"
+      },
+      "finish": {
+        "In": "left"
+      }
+    }
+  }
+}

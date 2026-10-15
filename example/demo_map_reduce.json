@@ -1,0 +1,434 @@
+{
+  "GraphID": "demo_map_reduce",
+  "Kind": "graph",
+  "Name": "Demo · Map 循环体 + Reduce 汇总",
+  "Description": "订单汇总：Map 对 orders 逐单运行循环体（容器内的一张小图：计算小计 → 按阈值分支 → 两路文案 → 汇合），map 实例上的自定义输入 threshold 同名传入循环体；之后两个 Reduce 分别合计金额、拼接明细。试跑 input：{\"orders\":[{\"name\":\"键盘\",\"price\":120,\"qty\":1},{\"name\":\"苹果\",\"price\":3,\"qty\":4},{\"name\":\"显示器\",\"price\":899,\"qty\":2}],\"threshold\":100}；期望 total=1930，report=键盘：大单 120 元；苹果：小单 12 元；显示器：大单 1798 元。",
+  "Graph": {
+    "Nodes": [
+      {
+        "ID": "start",
+        "Name": "开始",
+        "Kind": "__INNER__.start"
+      },
+      {
+        "ID": "lp",
+        "Name": "遍历订单",
+        "Inputs": {
+          "List": {
+            "From": "$input",
+            "Field": "orders"
+          },
+          "threshold": {
+            "From": "$input",
+            "Field": "threshold"
+          },
+          "Chunk": {
+            "Value": 1
+          },
+          "MaxParallel": {
+            "Value": 2
+          },
+          "Body": {
+            "Value": {
+              "Nodes": [
+                {
+                  "ID": "start",
+                  "Name": "开始",
+                  "Kind": "__INNER__.start"
+                },
+                {
+                  "ID": "calc",
+                  "Name": "计算小计",
+                  "Inputs": {
+                    "item": {
+                      "From": "$input",
+                      "Field": "Item"
+                    },
+                    "Outputs": {
+                      "Value": [
+                        {
+                          "Key": "amount",
+                          "Value": "item.price * item.qty"
+                        }
+                      ]
+                    }
+                  },
+                  "Kind": "code"
+                },
+                {
+                  "ID": "gate",
+                  "Name": "大单判断",
+                  "Inputs": {
+                    "amount": {
+                      "From": "calc",
+                      "Field": "amount"
+                    },
+                    "threshold": {
+                      "From": "$input",
+                      "Field": "threshold"
+                    },
+                    "Cases": {
+                      "Value": [
+                        {
+                          "ID": "Case0",
+                          "Label": "大单",
+                          "Expr": "amount >= threshold"
+                        },
+                        {
+                          "ID": "Case1",
+                          "Label": "小单",
+                          "IsDefault": true
+                        }
+                      ]
+                    }
+                  },
+                  "Kind": "__INNER__.switch"
+                },
+                {
+                  "ID": "big",
+                  "Name": "大单文案",
+                  "Inputs": {
+                    "item": {
+                      "From": "$input",
+                      "Field": "Item"
+                    },
+                    "amount": {
+                      "From": "calc",
+                      "Field": "amount"
+                    },
+                    "Outputs": {
+                      "Value": [
+                        {
+                          "Key": "label",
+                          "Value": "{{item.name}}：大单 {{amount}} 元"
+                        }
+                      ]
+                    }
+                  },
+                  "Kind": "template"
+                },
+                {
+                  "ID": "small",
+                  "Name": "小单文案",
+                  "Inputs": {
+                    "item": {
+                      "From": "$input",
+                      "Field": "Item"
+                    },
+                    "amount": {
+                      "From": "calc",
+                      "Field": "amount"
+                    },
+                    "Outputs": {
+                      "Value": [
+                        {
+                          "Key": "label",
+                          "Value": "{{item.name}}：小单 {{amount}} 元"
+                        }
+                      ]
+                    }
+                  },
+                  "Kind": "template"
+                },
+                {
+                  "ID": "join",
+                  "Name": "汇合",
+                  "Inputs": {
+                    "Mode": {
+                      "Value": "any"
+                    },
+                    "Outputs": {
+                      "Value": [
+                        {
+                          "Name": "label",
+                          "First": [
+                            {
+                              "From": "big",
+                              "Field": "label"
+                            },
+                            {
+                              "From": "small",
+                              "Field": "label"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "Kind": "__INNER__.merge"
+                },
+                {
+                  "ID": "end",
+                  "Name": "结束",
+                  "Inputs": {
+                    "amount": {
+                      "From": "calc",
+                      "Field": "amount"
+                    },
+                    "label": {
+                      "From": "join",
+                      "Field": "label"
+                    }
+                  },
+                  "Kind": "__INNER__.end"
+                }
+              ],
+              "Edges": [
+                {
+                  "ID": "b1",
+                  "From": "start.Out",
+                  "To": "calc.In"
+                },
+                {
+                  "ID": "b2",
+                  "From": "calc.Out",
+                  "To": "gate.In"
+                },
+                {
+                  "ID": "b3",
+                  "From": "gate.Case0",
+                  "To": "big.In"
+                },
+                {
+                  "ID": "b4",
+                  "From": "gate.Case1",
+                  "To": "small.In"
+                },
+                {
+                  "ID": "b5",
+                  "From": "big.Out",
+                  "To": "join.In"
+                },
+                {
+                  "ID": "b6",
+                  "From": "small.Out",
+                  "To": "join.In"
+                },
+                {
+                  "ID": "b7",
+                  "From": "join.Out",
+                  "To": "end.In"
+                }
+              ],
+              "InputSchema": {
+                "type": "object",
+                "properties": {
+                  "Item": {
+                    "description": "本轮订单"
+                  },
+                  "Index": {
+                    "type": "integer",
+                    "description": "本轮订单在 orders 中的下标"
+                  },
+                  "threshold": {
+                    "description": "大单阈值（来自 map 的同名输入）"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "Item",
+                  "threshold"
+                ]
+              }
+            }
+          }
+        },
+        "Kind": "__INNER__.map"
+      },
+      {
+        "ID": "total",
+        "Name": "合计金额",
+        "Inputs": {
+          "List": {
+            "From": "lp",
+            "Field": "Results"
+          },
+          "Init": {
+            "Value": "0"
+          },
+          "Expr": {
+            "Value": "Acc + Item.amount"
+          }
+        },
+        "Kind": "reduce"
+      },
+      {
+        "ID": "report",
+        "Name": "拼接明细",
+        "Inputs": {
+          "List": {
+            "From": "lp",
+            "Field": "Results"
+          },
+          "Init": {
+            "Value": "\"\""
+          },
+          "Expr": {
+            "Value": "Acc + (Index == 0 ? \"\" : \"；\") + Item.label"
+          }
+        },
+        "Kind": "reduce"
+      },
+      {
+        "ID": "finish",
+        "Name": "结束",
+        "Inputs": {
+          "total": {
+            "From": "total",
+            "Field": "Result"
+          },
+          "report": {
+            "From": "report",
+            "Field": "Result"
+          }
+        },
+        "Kind": "__INNER__.end"
+      }
+    ],
+    "Edges": [
+      {
+        "ID": "e1",
+        "From": "start.Out",
+        "To": "lp.In"
+      },
+      {
+        "ID": "e2",
+        "From": "lp.Out",
+        "To": "total.In"
+      },
+      {
+        "ID": "e3",
+        "From": "total.Out",
+        "To": "report.In"
+      },
+      {
+        "ID": "e4",
+        "From": "report.Out",
+        "To": "finish.In"
+      }
+    ],
+    "InputSchema": {
+      "type": "object",
+      "properties": {
+        "orders": {
+          "description": "订单列表，每项含 name、price、qty"
+        },
+        "threshold": {
+          "description": "大单阈值"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "orders",
+        "threshold"
+      ]
+    }
+  },
+  "UI": {
+    "Positions": {
+      "start": {
+        "X": 20,
+        "Y": 212
+      },
+      "lp": {
+        "X": 260,
+        "Y": 100
+      },
+      "total": {
+        "X": 1744,
+        "Y": 212
+      },
+      "report": {
+        "X": 2004,
+        "Y": 212
+      },
+      "finish": {
+        "X": 2264,
+        "Y": 212
+      }
+    },
+    "SubLayouts": {
+      "lp": {
+        "Positions": {
+          "start": {
+            "X": 24,
+            "Y": 140
+          },
+          "calc": {
+            "X": 212,
+            "Y": 140
+          },
+          "gate": {
+            "X": 472,
+            "Y": 128
+          },
+          "big": {
+            "X": 732,
+            "Y": 80
+          },
+          "small": {
+            "X": 732,
+            "Y": 200
+          },
+          "join": {
+            "X": 992,
+            "Y": 128
+          },
+          "end": {
+            "X": 1252,
+            "Y": 140
+          }
+        },
+        "EndpointSides": {
+          "start": {
+            "Out": "right"
+          },
+          "calc": {
+            "In": "left",
+            "Out": "right"
+          },
+          "gate": {
+            "In": "left",
+            "Case0": "right",
+            "Case1": "right"
+          },
+          "big": {
+            "In": "left",
+            "Out": "right"
+          },
+          "small": {
+            "In": "left",
+            "Out": "right"
+          },
+          "join": {
+            "In": "left",
+            "Out": "right"
+          },
+          "end": {
+            "In": "left"
+          }
+        }
+      }
+    },
+    "EndpointSides": {
+      "start": {
+        "Out": "right"
+      },
+      "lp": {
+        "In": "left",
+        "Out": "right"
+      },
+      "total": {
+        "In": "left",
+        "Out": "right"
+      },
+      "report": {
+        "In": "left",
+        "Out": "right"
+      },
+      "finish": {
+        "In": "left"
+      }
+    }
+  }
+}
