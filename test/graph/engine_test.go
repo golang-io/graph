@@ -42,7 +42,7 @@ func runBoth(t *testing.T, registry *node.Registry, g graph.Graph, input map[str
 		t.Fatalf("immediate: %v", err)
 	}
 	db := test.MustOpen(t, filepath.Join(t.TempDir(), "engine.db"))
-	eng, err := durable.With(durable.Options{Workers: 2, Shards: 2, PollInterval: 5 * time.Millisecond})(ctx,
+	eng, err := durable.With(durable.Options{Workers: 2, PollInterval: 5 * time.Millisecond})(ctx,
 		engine.EngineConfig{DB: db, Nodes: registry})
 	if err != nil {
 		t.Fatal(err)
@@ -109,9 +109,9 @@ func mustRaw(t *testing.T, v any) json.RawMessage {
 	return raw
 }
 
-// required 把输入名声明为必填的运行输入 Schema。
+// required 把输入名声明为必填的 string 型运行输入 Schema。
 func required(names ...string) *jsonschema.Schema {
-	return graph.RunInputSchema(names...)
+	return graph.RunInputSchema(graph.StringProps(names...))
 }
 
 func TestSameNodeExecutorServesImmediateAndDurable(t *testing.T) {
@@ -186,7 +186,7 @@ func TestCustomConditionBranchConsistency(t *testing.T) {
 }
 
 func TestCustomConditionEndpointErrorContract(t *testing.T) {
-	for _, badBranch := range []string{graph.EndpointError, "unregistered_tag"} {
+	for _, badBranch := range []string{"Error", "unregistered_tag"} {
 		t.Run("branch="+badBranch, func(t *testing.T) {
 			registry := newRegistry(t)
 			activity(t, registry, "cond_bad", []string{"yes", "no"}, []string{"test"}, func(context.Context, node.NodeInput) (node.NodeOutput, error) {
@@ -222,15 +222,19 @@ func TestDefaultAndMultipleMatchingEdgesConsistency(t *testing.T) {
 			{ID: "exact_path", Kind: "recorder"},
 			{ID: "def1", Kind: "recorder"},
 			{ID: "def2", Kind: "recorder"},
+			{ID: "m_def", Kind: builtin.Merge, Inputs: map[string]graph.InputRef{"Mode": {Value: json.RawMessage(`"all"`)}}},
+			{ID: "m_any", Kind: builtin.Merge, Inputs: map[string]graph.InputRef{"Mode": {Value: json.RawMessage(`"any"`)}}},
 			{ID: "end", Kind: builtin.End},
 		},
 		Edges: []graph.Edge{
 			ge("e_exact", "decide", "exact_path", "exact"),
 			ge("e_def1", "decide", "def1"),
 			ge("e_def2", "decide", "def2"),
-			ge("e_ex_end", "exact_path", "end"),
-			ge("e_d1_end", "def1", "end"),
-			ge("e_d2_end", "def2", "end"),
+			ge("e_d1_m", "def1", "m_def"),
+			ge("e_d2_m", "def2", "m_def"),
+			ge("e_ex_any", "exact_path", "m_any"),
+			ge("e_def_any", "m_def", "m_any"),
+			ge("e_any_end", "m_any", "end"),
 		},
 	})
 	visited := func(s engine.TaskSnapshot) map[string]bool {

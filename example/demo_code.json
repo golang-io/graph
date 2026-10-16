@@ -80,9 +80,15 @@
     "InputSchema": {
       "type": "object",
       "properties": {
-        "a": {},
-        "b": {},
-        "name": {}
+        "a": {
+          "type": "number"
+        },
+        "b": {
+          "type": "number"
+        },
+        "name": {
+          "type": "string"
+        }
       },
       "additionalProperties": false,
       "required": [

@@ -152,6 +152,27 @@ func TestStoreSaveDefinition(t *testing.T) {
 	if got.Name != "Upsert Test" {
 		t.Fatalf("got name %q, want 'Upsert Test'", got.Name)
 	}
+
+	// 非法 Engine 名称在 Save 时直接拒绝。
+	if _, err := st.Save(ctx, withEndpointSides(service.Definition{GraphID: "test_upsert", Engine: "bad engine!", Graph: g})); !errors.Is(err, engine.ErrInvalid) {
+		t.Fatalf("expected ErrInvalid for invalid engine kind, got %v", err)
+	}
+
+	// v1 带 Label，追加新版本 v2 未传 Label 时不应沿用 v1 的 Label。
+	v1WithLabel, err := st.Save(ctx, withEndpointSides(service.Definition{GraphID: "test_upsert", Label: "release-v1", Graph: g}))
+	if err != nil || v1WithLabel.Label != "release-v1" {
+		t.Fatalf("v1 label = %+v, err = %v", v1WithLabel, err)
+	}
+	g2 := g
+	g2.Nodes = append([]graph.Node(nil), g.Nodes...)
+	g2.Nodes[len(g2.Nodes)-1].Name = "end-v2"
+	v2NoLabel, err := st.Save(ctx, withEndpointSides(service.Definition{GraphID: "test_upsert", Graph: g2}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v2NoLabel.Version != v1WithLabel.Version+1 || v2NoLabel.Label != "" {
+		t.Fatalf("v2 = version %d label %q, want version %d and empty label", v2NoLabel.Version, v2NoLabel.Label, v1WithLabel.Version+1)
+	}
 }
 
 // TestSaveRollsBackWhenVersionInsertFails 确认新版本写入失败时整个 Save 回滚，当前版本保持不变。

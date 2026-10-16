@@ -21,6 +21,7 @@ export const GRAPH_ENDPOINT_ERROR = 'Error'
 /**
  * JSON Schema 片段（图级 Graph.InputSchema / 节点 NodeSpec.InputSchema）。
  * title → 表单标签；无 title → 绑定建议槽；enum → 下拉。
+ * 图级运行输入要求每个 property 带 type（可嵌套 items / properties）。
  */
 export type GraphJSONSchema = {
   type?: string | string[]
@@ -30,6 +31,15 @@ export type GraphJSONSchema = {
   required?: string[]
   properties?: Record<string, GraphJSONSchema>
   additionalProperties?: boolean | GraphJSONSchema
+  /** array 元素 Schema */
+  items?: GraphJSONSchema | GraphJSONSchema[]
+  minimum?: number
+  maximum?: number
+  minLength?: number
+  maxLength?: number
+  pattern?: string
+  minItems?: number
+  maxItems?: number
 }
 
 /**

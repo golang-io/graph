@@ -11,22 +11,20 @@ import (
 
 	"github.com/golang-io/graph"
 	"github.com/golang-io/graph/engine"
+	"github.com/golang-io/graph/node"
 )
 
-// Env 是一次 Apply 的环境：时间、ID 生成、编译与已加载的子图。内核不读时钟、不生成随机数，全部由 Env 提供，
+// Env 是一次 Apply 的环境：时间、ID 生成与已加载的子图。内核不读时钟、不生成随机数，全部由 Env 提供，
 // 因此相同的 Env 与入参必然得到相同结果（设计文档 5.1）。
 // Env 的字段都只做内存计算：按 GraphID 读取子图需要 IO，不经过 Env 调用，而是由引擎在 Apply 之外加载、
 // 放入 Graphs 后再调用 Apply（见 NeedGraph），所以 Apply 不会在引擎的写回事务内访问外部资源。
 //
-// Env supplies time, IDs, compilation and preloaded subgraphs to Apply; none of them performs IO.
+// Env supplies time, IDs and preloaded subgraphs to Apply; none of them performs IO.
 type Env struct {
 	// Now 是本次处理事件的时刻；为零值时使用 time.Now().UTC()（只用于不关心确定性的调用方）。
 	Now time.Time
 	// NewID 生成 Run 与子 Task 的 ID；为空时使用 NewID（UUID v7，按时间有序）。
 	NewID func() string
-	// Compile 编译图（按 GraphID 加载的子图、map 循环体等内嵌子图），通常为 Cache.Compile；
-	// 为空时直接调用 Compile（不缓存）。
-	Compile func(g graph.Graph) (*Compiled, error)
 	// Graphs 是引擎已加载的子图：GraphID → 加载结果（图或加载错误）。
 	// 节点按 GraphID 派生子 Task 而这里没有该 GraphID 时，Apply 在 Changes.NeedGraphs 中返回缺少的 GraphID。
 	Graphs map[string]LoadedGraph
@@ -95,17 +93,17 @@ func (env Env) newID() string {
 //   - 内核缺陷：其余 error（如 Controller 返回非法形态），引擎改为保存 Fail 的结果。
 //
 // Apply applies one event to a task's state and returns the changes and commands.
-func Apply(c *Compiled, task *engine.Task, runs []*engine.Run, ev Event, env Env) (Changes, []Command, error) {
+func Apply(reg *node.Registry, task *engine.Task, runs []*engine.Run, ev Event, env Env) (Changes, []Command, error) {
 	if task == nil {
 		return Changes{}, nil, fmt.Errorf("kernel: task required")
 	}
 	if graph.IsTerminal(task.Status) {
 		return Changes{}, nil, nil
 	}
-	if c == nil {
-		return Changes{}, nil, fmt.Errorf("kernel: compiled graph required for task %s", task.TaskID)
+	if reg == nil {
+		return Changes{}, nil, fmt.Errorf("kernel: node registry required for task %s", task.TaskID)
 	}
-	st := newState(c, task, runs, env)
+	st := newState(reg, task, runs, env)
 	var err error
 	switch ev := ev.(type) {
 	case Started:
@@ -157,16 +155,17 @@ func reject(sentinel error, format string, args ...any) error {
 // 等待关系（哪个 Run 在等哪些子 Task）同样是工作副本 awaiting：由 Env.Awaiting 深复制而来，
 // 本次的增减记入 released，结束时由 finish 输出为 Changes.Released。
 type state struct {
-	c   *Compiled // Fail 时为 nil：只做取消与结束，不访问图
+	c   *graphView // Fail 时为 nil：只做取消与结束，不访问图
 	env Env
 	now time.Time
 
 	task      *engine.Task
 	taskDirty bool
 
-	runs  map[string]*engine.Run
-	dirty []string // 按首次修改顺序的 RunID
-	seen  map[string]bool
+	runs       map[string]*engine.Run
+	dirty      []string // 按首次修改顺序的 RunID
+	seen       map[string]bool
+	ownOutputs map[string]bool // 记录本次 Apply 内已拥有独立 Outputs 顶层 map 的 RunID
 
 	awaiting     map[string]map[string]string // RunID → Slot → TaskID，本次等待关系的工作副本
 	released     []string                     // 本次不再等待的子 TaskID（按释放顺序，已去重）
@@ -177,18 +176,28 @@ type state struct {
 	notify   *NotifyParent
 }
 
-func newState(c *Compiled, task *engine.Task, runs []*engine.Run, env Env) *state {
+func newState(reg *node.Registry, task *engine.Task, runs []*engine.Run, env Env) *state {
+	var gv *graphView
+	if reg != nil && task != nil {
+		gv = newGraphView(reg, task.Graph)
+	}
 	st := &state{
-		c: c, env: env, now: env.now(),
-		task:         task.Clone(),
+		c: gv, env: env, now: env.now(),
+		task:         cloneTaskForState(task),
 		runs:         make(map[string]*engine.Run, len(runs)),
 		seen:         map[string]bool{},
+		ownOutputs:   map[string]bool{},
 		awaiting:     make(map[string]map[string]string, len(env.Awaiting)),
 		releasedSeen: map[string]bool{},
 	}
 	for _, r := range runs {
-		if r != nil {
-			st.runs[r.RunID] = r.Clone()
+		if r == nil {
+			continue
+		}
+		if graph.IsTerminal(r.Status) {
+			st.runs[r.RunID] = r
+		} else {
+			st.runs[r.RunID] = cloneRunForState(r)
 		}
 	}
 	for runID, slots := range env.Awaiting {
@@ -196,6 +205,36 @@ func newState(c *Compiled, task *engine.Task, runs []*engine.Run, env Env) *stat
 		st.awaiting[runID] = maps.Clone(slots)
 	}
 	return st
+}
+
+// cloneTaskForState 复制 Task 供单次 Apply 内部修改状态，共享只读的 Graph 与 Input，避免每次推进深拷贝整张图。
+func cloneTaskForState(t *engine.Task) *engine.Task {
+	if t == nil {
+		return nil
+	}
+	out := *t
+	out.Policy.Debug = t.Policy.Debug.Clone()
+	out.Output = engine.CloneMap(t.Output)
+	if t.FinishedAt != nil {
+		at := *t.FinishedAt
+		out.FinishedAt = &at
+	}
+	return &out
+}
+
+// cloneRunForState 复制非终态 Run 的结构体供单次 Apply 推进；
+// Outputs 与 Arrivals 采用写时复制（仅在 Run 实际写入新输出或新到达分支时浅拷贝顶层 map），
+// 避免在单步推进时将全部未受影响并发分支的 Outputs / Arrivals 逐一复制。
+func cloneRunForState(r *engine.Run) *engine.Run {
+	if r == nil {
+		return nil
+	}
+	out := *r
+	out.Output = engine.CloneMap(r.Output)
+	if r.State != nil {
+		out.State = append([]byte(nil), r.State...)
+	}
+	return &out
 }
 
 // awaited 返回 Run 在等待的子 Task（Slot → TaskID）；不在等待时返回 nil。返回的 map 只读。
@@ -248,9 +287,10 @@ func (st *state) save(r *engine.Run) {
 	}
 }
 
-// insert 加入新建的 Run。
+// insert 加入新建的 Run（新建 Run 的 Outputs 为本次新分配的 map，直接记入 ownOutputs）。
 func (st *state) insert(r *engine.Run) {
 	st.runs[r.RunID] = r
+	st.ownOutputs[r.RunID] = true
 	st.save(r)
 }
 
@@ -275,6 +315,7 @@ func (st *state) finish() (Changes, []Command) {
 	if !st.taskDirty && len(st.dirty) == 0 && len(st.released) == 0 {
 		return Changes{}, nil
 	}
+	st.checkStalledJoin()
 	t := st.task
 	if !graph.IsTerminal(t.Status) {
 		if status := summarizeRuns(st.runs); status != "" {
@@ -288,6 +329,27 @@ func (st *state) finish() (Changes, []Command) {
 	}
 	ch.Released = filterReleased(st.released, st.children)
 	return ch, collectCommands(st.children, st.cancels, ch.Runs, st.notify)
+}
+
+// checkStalledJoin 检查是否所有活跃路径均已结束、仅剩停在 Merge(all) 等待未激活分支的 Run：
+// 若图中不再有任何 PENDING / RUNNING / WAITING(subgraph) / WAITING(debug) 的 Run，
+// 说明其余入边永远不会到达，直接将该汇合节点置为 FAILED，防止 Task 永久僵死在 WAITING。
+func (st *state) checkStalledJoin() {
+	if st.c == nil || graph.IsTerminal(st.task.Status) {
+		return
+	}
+	var stalled *engine.Run
+	for _, r := range st.list(engine.Live...) {
+		if r.Status != graph.WAITING || r.WaitReason != engine.WaitJoin {
+			return
+		}
+		if stalled == nil {
+			stalled = r
+		}
+	}
+	if stalled != nil {
+		_ = st.nodeFailed(stalled, st.c.node(stalled.NodeID), fmt.Errorf("merge (mode=all) cannot complete: some incoming branches were not activated"))
+	}
 }
 
 // summarizeRuns 按 Run 汇总未结束 Task 的状态；没有未结束的 Run 时返回空（保持原状态）。

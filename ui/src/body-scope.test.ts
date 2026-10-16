@@ -15,7 +15,14 @@ const pack = createGraphNodePackFromCatalog('catalog', [
 ])
 
 const body: GraphJSON = {
-  InputSchema: { type: 'object', properties: { Item: {} }, required: ['Item'], additionalProperties: false },
+  InputSchema: {
+    type: 'object',
+    properties: {
+      Item: { type: ['string', 'integer', 'number', 'boolean', 'object', 'array', 'null'] },
+    },
+    required: ['Item'],
+    additionalProperties: false,
+  },
   Nodes: [{ ID: 'start', Kind: 'start' }, { ID: 'body', Kind: 'template' }, { ID: 'end', Kind: 'end' }],
   Edges: [{ ID: 'b1', From: 'start.Out', To: 'body.In' }, { ID: 'b2', From: 'body.Out', To: 'end.In' }],
 }

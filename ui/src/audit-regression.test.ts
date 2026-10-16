@@ -8,6 +8,8 @@ import {
   mergeOverlaySnapshot,
   overlayDebugWaitingRuns,
   overlayIsHung,
+  overlayIsPausedOrDebugWaiting,
+  overlayIsRunning,
   overlayWaitReasons,
   recallDebugSession,
   rememberDebugSession,
@@ -63,7 +65,7 @@ describe('run-overlay', () => {
     expect(got?.Runs).toEqual([])
   })
 
-  it('detects hung waiting tasks', () => {
+  it('detects hung waiting tasks and distinguishes subgraph/join waiting from debug pause', () => {
     expect(overlayIsHung(snap('t', 'WAITING'))).toBe(true)
     expect(overlayWaitReasons({
       Runs: [
@@ -77,6 +79,37 @@ describe('run-overlay', () => {
         { RunID: 'j', TaskID: 't', NodeID: 'm', Seq: 1, Status: 'WAITING', WaitReason: 'join' },
       ],
     }).map((r) => r.RunID)).toEqual(['r'])
+
+    // WAITING(subgraph) / WAITING(join) with no Paused and no debug waiting run: still running, NOT paused/debug-waiting
+    const subgraphWaiting: GraphTaskSnapshot = {
+      ...snap('t', 'WAITING'),
+      Runs: [
+        { RunID: 's', TaskID: 't', NodeID: 'sub', Seq: 1, Status: 'WAITING', WaitReason: 'subgraph' },
+        { RunID: 'j', TaskID: 't', NodeID: 'm', Seq: 1, Status: 'WAITING', WaitReason: 'join' },
+      ],
+    }
+    expect(overlayIsPausedOrDebugWaiting(subgraphWaiting)).toBe(false)
+    expect(overlayIsRunning(subgraphWaiting)).toBe(true)
+
+    // WAITING(debug): paused/debug-waiting, not actively running
+    const debugWaiting: GraphTaskSnapshot = {
+      ...snap('t', 'WAITING'),
+      Runs: [{ RunID: 'd', TaskID: 't', NodeID: 'step1', Seq: 1, Status: 'WAITING', WaitReason: 'debug' }],
+    }
+    expect(overlayIsPausedOrDebugWaiting(debugWaiting)).toBe(true)
+    expect(overlayIsRunning(debugWaiting)).toBe(false)
+
+    // WAITING(subgraph) with Task.Paused = true: paused/debug-waiting
+    const pausedSubgraph: GraphTaskSnapshot = {
+      Task: { ...snap('t', 'WAITING').Task, Paused: true },
+      Runs: [{ RunID: 's', TaskID: 't', NodeID: 'sub', Seq: 1, Status: 'WAITING', WaitReason: 'subgraph' }],
+    }
+    expect(overlayIsPausedOrDebugWaiting(pausedSubgraph)).toBe(true)
+    expect(overlayIsRunning(pausedSubgraph)).toBe(false)
+
+    // Terminal task: neither running nor paused/debug-waiting
+    expect(overlayIsPausedOrDebugWaiting(snap('t', 'SUCCEEDED'))).toBe(false)
+    expect(overlayIsRunning(snap('t', 'SUCCEEDED'))).toBe(false)
   })
 
   it('allows breakpoints on all top-level executable nodes (both activity and inline)', () => {

@@ -15,13 +15,10 @@ export function graphMinimapMask(): string {
   return isGraphDarkMode() ? 'rgba(0,0,0,0.55)' : 'rgba(240,240,245,0.7)'
 }
 
-/** 运行态优先，否则按节点类型着色 */
-export function graphMinimapNodeColor(
-  n: Node,
-  opts?: { preferRunStatus?: boolean },
-): string {
-  const data = n.data as RFNodeData | undefined
-  if (opts?.preferRunStatus) {
+const minimapColorCache = new WeakMap<object, { dark: boolean; prefer: boolean; color: string }>()
+
+function computeMinimapNodeColor(data: RFNodeData | undefined, prefer: boolean, dark: boolean): string {
+  if (prefer) {
     const st = data?.runStatus as RunStatus | undefined
     if (st === 'succeeded') return '#16a34a'
     if (st === 'failed') return '#dc2626'
@@ -31,10 +28,10 @@ export function graphMinimapNodeColor(
   if (nt === 'annotation') {
     const c = data?.color?.trim()
     if (c && /^#[0-9a-fA-F]{3,8}$/.test(c)) return c
-    return isGraphDarkMode() ? '#52525b' : '#d4d4d8'
+    return dark ? '#52525b' : '#d4d4d8'
   }
   if (nt === 'start') return '#06b6d4'
-  if (nt === 'end') return isGraphDarkMode() ? '#a1a1aa' : '#171717'
+  if (nt === 'end') return dark ? '#a1a1aa' : '#171717'
   if (nt === 'switch') return '#f59e0b'
   if (nt === 'merge') return '#0d9488'
   if (nt === 'parallel') return '#4f46e5'
@@ -45,4 +42,24 @@ export function graphMinimapNodeColor(
   if (nt === 'llm' || nt === 'agent') return '#06b6d4'
   if (nt === 'http') return '#0ea5e9'
   return '#8b5cf6'
+}
+
+/** 运行态优先，否则按节点类型着色；按 n.data 引用缓存避免缩略图高频更新时重复解析 */
+export function graphMinimapNodeColor(
+  n: Node,
+  opts?: { preferRunStatus?: boolean },
+): string {
+  const data = n.data as RFNodeData | undefined
+  const prefer = Boolean(opts?.preferRunStatus)
+  const dark = isGraphDarkMode()
+  if (data && typeof data === 'object') {
+    const cached = minimapColorCache.get(data)
+    if (cached && cached.dark === dark && cached.prefer === prefer) {
+      return cached.color
+    }
+    const color = computeMinimapNodeColor(data, prefer, dark)
+    minimapColorCache.set(data, { dark, prefer, color })
+    return color
+  }
+  return computeMinimapNodeColor(data, prefer, dark)
 }

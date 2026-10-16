@@ -214,6 +214,15 @@
                 "type": "object",
                 "properties": {
                   "Item": {
+                    "type": [
+                      "string",
+                      "integer",
+                      "number",
+                      "boolean",
+                      "object",
+                      "array",
+                      "null"
+                    ],
                     "description": "本轮订单"
                   },
                   "Index": {
@@ -221,6 +230,7 @@
                     "description": "本轮订单在 orders 中的下标"
                   },
                   "threshold": {
+                    "type": "number",
                     "description": "大单阈值（来自 map 的同名输入）"
                   }
                 },
@@ -311,9 +321,31 @@
       "type": "object",
       "properties": {
         "orders": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "price": {
+                "type": "number"
+              },
+              "qty": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "name",
+              "price",
+              "qty"
+            ]
+          },
           "description": "订单列表，每项含 name、price、qty"
         },
         "threshold": {
+          "type": "number",
           "description": "大单阈值"
         }
       },

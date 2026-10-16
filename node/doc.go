@@ -11,7 +11,7 @@
 // 在子包 node/builtin；本包不 import builtin，依赖方向为 builtin → node。
 //
 // 图模型在 graph 包：graph.Node 是落图实例（含 Inputs 引用表），与本包 Node 接口不同。
-// Registry.Validate / ValidateGraph 单次遍历完成全图校验与节点静态参数解码；状态机推进在 engine/kernel（kernel.Compile / kernel.Apply），本包不做推进。
+// Registry.Validate 单次遍历完成全图校验与节点静态参数解码；状态机推进在 engine/kernel（kernel.Apply），本包不做推进。
 //
 // 依赖：node → graph；graph 永不 import node。
 // 装配在 service.NewNodeRegistry：builtin.Nodes() 加业务节点，一并传给 NewRegistry。

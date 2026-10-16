@@ -146,7 +146,17 @@
               "InputSchema": {
                 "type": "object",
                 "properties": {
-                  "Item": {}
+                  "Item": {
+                    "type": [
+                      "string",
+                      "integer",
+                      "number",
+                      "boolean",
+                      "object",
+                      "array",
+                      "null"
+                    ]
+                  }
                 },
                 "additionalProperties": false,
                 "required": [
@@ -236,8 +246,15 @@
     "InputSchema": {
       "type": "object",
       "properties": {
-        "score": {},
-        "items": {}
+        "score": {
+          "type": "number"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       },
       "additionalProperties": false,
       "required": [

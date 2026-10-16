@@ -279,8 +279,19 @@ func (r *EngineRegistry) Watch(ctx context.Context, taskID string) (SnapshotStre
 	return newSnapshotStream(wctx, cancel, ch), nil
 }
 
-// Signal 向 Task 投递控制信号；对已结束的 Task 返回当前状态，不报错。
+// Signal 向 Task 投递控制信号；对已结束的 Task 返回当前状态，不报错。关闭中拒绝执行。
 func (r *EngineRegistry) Signal(ctx context.Context, taskID string, sig engine.Signal) (engine.Receipt, error) {
+	if err := ctx.Err(); err != nil {
+		return engine.Receipt{}, err
+	}
+	r.mu.Lock()
+	if r.closing {
+		r.mu.Unlock()
+		return engine.Receipt{}, fmt.Errorf("%w: runtime is closing", engine.ErrConflict)
+	}
+	r.active.Add(1)
+	r.mu.Unlock()
+	defer r.active.Done()
 	taskID = strings.TrimSpace(taskID)
 	eng, err := r.ForTask(ctx, taskID)
 	if err != nil {

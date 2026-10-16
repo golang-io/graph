@@ -2,7 +2,7 @@
   "GraphID": "demo_implicit_fork",
   "Kind": "graph",
   "Name": "Demo · 同一出口多线",
-  "Description": "验证隐式分叉/汇聚：普通节点同一端口拖出两条空 when 线，全部执行；下游普通节点等两路到齐后执行一次，通过输入引用分别读取两路节点的输出。试跑 {\"name\":\"Ada\"}。期望 greeting=同源：Ada，left=上路:Ada，right=下路:Ada，summary=上路:Ada | 下路:Ada。serial / parallel 都应得到同一份输出。",
+  "Description": "验证隐式分叉与显式合并：普通节点同一端口拖出两条线，全部执行；下游经 merge(all) 等两路到齐后执行一次，通过输入引用分别读取两路节点的输出。试跑 {\"name\":\"Ada\"}。期望 greeting=同源：Ada，left=上路:Ada，right=下路:Ada，summary=上路:Ada | 下路:Ada。serial / parallel 都应得到同一份输出。",
   "Graph": {
     "Nodes": [
       {
@@ -68,8 +68,18 @@
         "Kind": "template"
       },
       {
+        "ID": "merge",
+        "Name": "齐汇",
+        "Inputs": {
+          "Mode": {
+            "Value": "all"
+          }
+        },
+        "Kind": "__INNER__.merge"
+      },
+      {
         "ID": "join",
-        "Name": "隐式汇聚",
+        "Name": "汇总拼接",
         "Inputs": {
           "left": {
             "From": "left",
@@ -133,11 +143,16 @@
       {
         "ID": "e4",
         "From": "left.Out",
-        "To": "join.In"
+        "To": "merge.In"
       },
       {
         "ID": "e5",
         "From": "right.Out",
+        "To": "merge.In"
+      },
+      {
+        "ID": "e_m_join",
+        "From": "merge.Out",
         "To": "join.In"
       },
       {
@@ -149,7 +164,9 @@
     "InputSchema": {
       "type": "object",
       "properties": {
-        "name": {}
+        "name": {
+          "type": "string"
+        }
       },
       "additionalProperties": false,
       "required": [
@@ -174,8 +191,8 @@
         "Color": "#0d9488",
         "Height": 520,
         "ID": "ann_join",
-        "Note": "「隐式汇聚」不是 merge 节点：等两路到齐后只执行一次，用输入引用分别读取 left、right 两个节点的输出。要 any 才用汇合节点。",
-        "Title": "② 普通节点隐式汇聚",
+        "Note": "多条入边经 merge(all) 汇合：等两路到齐后只执行一次，下游分别读取 left、right 两个节点的输出。",
+        "Title": "② Merge(all) 汇聚",
         "Width": 560,
         "X": 960,
         "Y": 20
@@ -183,7 +200,7 @@
     ],
     "Positions": {
       "finish": {
-        "X": 1320,
+        "X": 1460,
         "Y": 226
       },
       "fork": {
@@ -191,12 +208,16 @@
         "Y": 226
       },
       "join": {
-        "X": 1020,
+        "X": 1180,
         "Y": 226
       },
       "left": {
         "X": 680,
         "Y": 80
+      },
+      "merge": {
+        "X": 960,
+        "Y": 226
       },
       "right": {
         "X": 680,
@@ -208,18 +229,10 @@
       }
     },
     "EndpointSides": {
-      "start": {
-        "Out": "right"
+      "finish": {
+        "In": "left"
       },
       "fork": {
-        "In": "left",
-        "Out": "right"
-      },
-      "left": {
-        "In": "left",
-        "Out": "right"
-      },
-      "right": {
         "In": "left",
         "Out": "right"
       },
@@ -227,8 +240,20 @@
         "In": "left",
         "Out": "right"
       },
-      "finish": {
-        "In": "left"
+      "left": {
+        "In": "left",
+        "Out": "right"
+      },
+      "merge": {
+        "In": "left",
+        "Out": "right"
+      },
+      "right": {
+        "In": "left",
+        "Out": "right"
+      },
+      "start": {
+        "Out": "right"
       }
     }
   }

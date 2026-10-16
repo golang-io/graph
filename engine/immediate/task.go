@@ -19,13 +19,12 @@ import (
 //   - 处理循环是 t、runs 的唯一写入者，逐个处理 mailbox 中的事件：调用 kernel.Apply、保存改动、执行命令、派发活动节点；
 //   - 处理循环读取自己的状态不加锁；写入时持有 mu，Snapshot / Watch 等读取方持有 mu 复制；
 //   - 活动节点在独立 goroutine 中执行，结果以 ActivityDone 投递回 mailbox；
-//   - ready、running、cancels、timer、notify、graphs、awaiting 只由处理循环访问；queued、granted 由 slots.mu 保护。
+//   - ready、running、cancels、timer、notify、awaiting 只由处理循环访问。
 //
 // task is one task's in-memory state, owned by its processing loop.
 type task struct {
 	e   *Engine
 	id  string
-	c   *kernel.Compiled
 	box *mailbox
 
 	mu      sync.Mutex
@@ -38,27 +37,23 @@ type task struct {
 	cancels map[string]context.CancelFunc     // RunID → 执行中节点的取消函数
 	timer   *time.Timer                       // 最早一个未到期重试的唤醒定时器
 	notify  []kernel.NotifyParent             // Task 结束时、写库之后才投递给父 Task
-	graphs  map[string]kernel.LoadedGraph     // 已加载的子图（GraphID → 加载结果），作为 Env.Graphs 传给 Apply
 	// awaiting 是内存中的等待关系（RunID → Slot → 子 TaskID），作为 Env.Awaiting 传给 Apply；
 	// 内核只读它，增减由保存 Changes.Released 与执行 StartChild 时维护。
 	// durable 侧以子 Task 行的 Awaited 落库实现同一关系，见 engine/durable。
 	awaiting map[string]map[string]string
 
-	queued  bool // 在 slots 等待队列中
-	granted int  // slots 已交给本 Task、尚未使用的名额
-
 	ctx    context.Context // Task 结束时取消，中断仍在执行的活动节点
 	cancel context.CancelFunc
 }
 
-func (e *Engine) newTask(t *engine.Task, c *kernel.Compiled) *task {
+func (e *Engine) newTask(t *engine.Task) *task {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &task{
-		e: e, id: t.TaskID, c: c, box: newMailbox(),
+		e: e, id: t.TaskID, box: newMailbox(),
 		t: t, runs: map[string]*engine.Run{}, changed: make(chan struct{}),
 		ready: map[string]kernel.ExecuteActivity{}, cancels: map[string]context.CancelFunc{},
-		graphs: map[string]kernel.LoadedGraph{}, awaiting: map[string]map[string]string{},
-		ctx: ctx, cancel: cancel,
+		awaiting: map[string]map[string]string{},
+		ctx:      ctx, cancel: cancel,
 	}
 }
 
@@ -94,7 +89,7 @@ func (t *task) call(ctx context.Context, ev kernel.Event) (engine.Receipt, error
 
 // handle 处理一条消息：活动节点的结果先结算执行计数，然后应用事件并回复调用方。
 // ActivityDone 只由本 Task 的 launch 投递，因此这里的 running-- 与 launch 中的 running++ 一一对应；
-// 加载子图后重新投递的消息（m.graphs 非空）已在首次投递时结算过，只并入子图后重新应用。
+// 加载子图后重新投递的消息（m.graphs 非空）已在首次投递时结算过，只携带本次事件已解析的子图重新应用。
 // Apply 缺少子图时不回复调用方，由 load 在后台加载后重新投递同一条消息，届时再回复。
 func (t *task) handle(m message) {
 	if m.fail != nil {
@@ -104,16 +99,16 @@ func (t *task) handle(m message) {
 		}
 		return
 	}
-	if m.graphs != nil {
-		maps.Copy(t.graphs, m.graphs)
-	} else if done, ok := m.ev.(kernel.ActivityDone); ok {
-		t.running--
-		if cancel := t.cancels[done.RunID]; cancel != nil {
-			cancel()
-			delete(t.cancels, done.RunID)
+	if m.graphs == nil {
+		if done, ok := m.ev.(kernel.ActivityDone); ok {
+			t.running--
+			if cancel := t.cancels[done.RunID]; cancel != nil {
+				cancel()
+				delete(t.cancels, done.RunID)
+			}
 		}
 	}
-	need, err := t.apply(m.ev)
+	need, err := t.apply(m.ev, m.graphs)
 	if len(need) > 0 {
 		t.load(need, m)
 		return
@@ -128,7 +123,10 @@ func (t *task) handle(m message) {
 // 重新应用时事件若已过期（如 Run 已被取消），内核按过期事件忽略。
 // Task 已结束（mailbox 已关闭）时投递失败，直接回复调用方当前状态。
 func (t *task) load(ids []string, m message) {
-	got := maps.Clone(t.graphs)
+	got := maps.Clone(m.graphs)
+	if got == nil {
+		got = map[string]kernel.LoadedGraph{}
+	}
 	t.e.wg.Go(func() {
 		if err := engine.LoadGraphs(t.ctx, t.e.cfg.ResolveGraph, ids, got); err != nil {
 			m.fail = err
@@ -143,12 +141,12 @@ func (t *task) load(ids []string, m message) {
 // apply 把事件交给内核，保存改动并执行命令。拒绝类错误原样返回、不改状态；
 // 其余错误属于内核缺陷：上报 Observer，并改为保存 kernel.Fail 的结果（Task FAILED，设计文档 5.5）。
 // Changes.NeedGraphs 非空时原样返回缺少的 GraphID 列表，由调用方在后台加载后重试。
-func (t *task) apply(ev kernel.Event) ([]string, error) {
+func (t *task) apply(ev kernel.Event, graphs map[string]kernel.LoadedGraph) ([]string, error) {
 	runs := t.list()
 	env := t.e.env()
-	env.Graphs = t.graphs
+	env.Graphs = graphs
 	env.Awaiting = t.awaiting
-	ch, cmds, err := kernel.Apply(t.c, t.t, runs, ev, env)
+	ch, cmds, err := kernel.Apply(t.e.cfg.Nodes, t.t, runs, ev, env)
 	if err != nil {
 		if kernel.IsRejection(err) {
 			return nil, err
@@ -265,25 +263,15 @@ func (t *task) limit() int {
 	return p.MaxParallel
 }
 
-// dispatch 在单 Task 上限与全局名额内派发到期的活动节点，然后为最早一个未到期的重试设置定时唤醒。
-// 全局名额不足时 Run 保持 PENDING，本 Task 留在等待队列中，拿到名额时被唤醒再派发；
-// 其余情况（无可派发、受单 Task 上限限制）退出等待队列并交还未使用的名额。
+// dispatch 在单 Task 并发上限内派发到期的活动节点，然后为最早一个未到期的重试设置定时唤醒。
 func (t *task) dispatch() {
 	now := t.e.cfg.Now()
-	waiting := false
 	for t.running < t.limit() && !graph.IsTerminal(t.t.Status) {
 		cmd, ok := t.next(now)
 		if !ok {
 			break
 		}
-		if !t.e.slots.acquire(t) {
-			waiting = true
-			break
-		}
 		t.launch(cmd)
-	}
-	if !waiting {
-		t.e.slots.leave(t)
 	}
 	t.arm(now)
 }
@@ -310,14 +298,13 @@ func (t *task) next(now time.Time) (kernel.ExecuteActivity, bool) {
 	return pick, found
 }
 
-// launch 派发一个活动节点（已取得全局名额）：Run 置为 RUNNING，执行器在独立 goroutine 中运行，
-// 返回后先归还名额再把结果投递回 mailbox。Task 已结束时投递被丢弃。
+// launch 派发一个活动节点：Run 置为 RUNNING，执行器在独立 goroutine 中运行，返回后把结果投递回 mailbox。
+// Task 已结束时投递被丢弃。
 func (t *task) launch(cmd kernel.ExecuteActivity) {
 	delete(t.ready, cmd.RunID)
 	r := t.runs[cmd.RunID]
-	act, err := kernel.NewActivity(t.c, t.t, r)
+	act, err := kernel.NewActivity(t.e.cfg.Nodes, t.t, r)
 	if err != nil {
-		t.e.slots.release()
 		t.fail(err)
 		return
 	}
@@ -331,7 +318,6 @@ func (t *task) launch(cmd kernel.ExecuteActivity) {
 	t.cancels[r.RunID] = cancel
 	t.e.wg.Go(func() {
 		out, err := act.Run(ctx)
-		t.e.slots.release()
 		t.box.put(message{ev: act.Done(out, err)})
 	})
 }
@@ -353,7 +339,7 @@ func (t *task) arm(now time.Time) {
 	}
 }
 
-// finalize 在 Task 进入终态后收尾：关闭 mailbox、中断仍在执行的节点、退出名额队列、写库，
+// finalize 在 Task 进入终态后收尾：关闭 mailbox、中断仍在执行的节点、写库，
 // 然后回复关闭前已投递的调用、通知父 Task，并按 Options.Retain 在内存中保留一段时间（第 9 条）。
 func (t *task) finalize() {
 	pending := t.box.close()
@@ -361,7 +347,6 @@ func (t *task) finalize() {
 	if t.timer != nil {
 		t.timer.Stop()
 	}
-	t.e.slots.leave(t)
 	t.e.persist(t)
 	rec := engine.TaskReceipt(t.t)
 	for _, m := range pending {
@@ -382,6 +367,25 @@ func (t *task) receipt() engine.Receipt {
 	return engine.TaskReceipt(t.t)
 }
 
+// idle 报告 Task 是否已到达终态或停在调试等待上，并返回下一次变化的通知 channel（不深拷贝快照）。
+func (t *task) idle() (bool, <-chan struct{}) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if graph.IsTerminal(t.t.Status) {
+		return true, t.changed
+	}
+	parked := false
+	for _, r := range t.runs {
+		switch r.Status {
+		case graph.PENDING, graph.RUNNING:
+			return false, t.changed
+		case graph.WAITING:
+			parked = parked || r.WaitReason == engine.WaitDebug
+		}
+	}
+	return parked, t.changed
+}
+
 // view 返回当前快照与下一次变化的通知 channel（同一把锁内取得，不会漏掉变化）。
 func (t *task) view() (engine.TaskSnapshot, <-chan struct{}) {
 	t.mu.Lock()
@@ -392,6 +396,28 @@ func (t *task) view() (engine.TaskSnapshot, <-chan struct{}) {
 		runs = append(runs, *r.Clone())
 	}
 	return engine.Snapshot(*task, runs), t.changed
+}
+
+// finalSnapshot 在单次执行临时引擎即将关闭前导出终态快照（供 Execute 使用）：
+// 复制 Task 与各 Run 的顶层结构，共享已归档分支上只读的节点输出内层 map，避免在大量分支汇合的图中重复深拷贝历史节点输出。
+func (t *task) finalSnapshot() engine.TaskSnapshot {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	task := t.t.Clone()
+	runs := make([]engine.Run, 0, len(t.runs))
+	for _, r := range t.runs {
+		cp := *r
+		cp.Outputs = maps.Clone(r.Outputs)
+		cp.Output = engine.CloneMap(r.Output)
+		if r.State != nil {
+			cp.State = append([]byte(nil), r.State...)
+		}
+		if r.Arrivals != nil {
+			cp.Arrivals = maps.Clone(r.Arrivals)
+		}
+		runs = append(runs, cp)
+	}
+	return engine.Snapshot(*task, runs)
 }
 
 // summary 返回列表摘要。

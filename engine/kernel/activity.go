@@ -3,7 +3,6 @@ package kernel
 import (
 	"context"
 	"fmt"
-	"maps"
 	"time"
 
 	"github.com/golang-io/graph"
@@ -20,8 +19,8 @@ import (
 // Activity is one activity-node invocation executed outside Apply.
 type Activity struct {
 	Node   graph.Node
-	Vars   map[string]any // 投影后的输入（已合入调试注入的值）
-	Params any            // 编译期解码并冻结在 Compiled 中的节点静态参数结构体
+	Vars   map[string]any // 投影后的只读输入（已合入调试注入的值）
+	Params any            // 节点运行期参数结构体
 	// Key 是准备调用时 Run 所在执行的身份：Run 把它交给执行器，幂等键为 RunID:Seq（设计文档 8.6）；
 	// Done 用其中的 RunID/Seq/Attempt 填入 ActivityDone，供内核判断结果是否过期。调用方不应修改。
 	Key     node.RunKey
@@ -32,30 +31,29 @@ type Activity struct {
 	lookup  func(graph.InputRef) (any, bool)
 }
 
-// NewActivity 为 Run 准备活动节点调用：按投影计划从 Run.Outputs 与 Task.Input 取输入、按输入名合入调试注入的值、
+// NewActivity 为 Run 准备活动节点调用：按节点 Inputs 从 Run.Outputs 与 Task.Input 取输入、按输入名合入调试注入的值、
 // 查找执行器；调试注入的 Failed 只在进入节点时判定（内核前置检查），这里不再处理。
 // Run 不在活动节点上或执行器缺失时返回 error（图与注册表不一致，属于引擎缺陷）。
-func NewActivity(c *Compiled, task *engine.Task, r *engine.Run) (*Activity, error) {
-	n, ok := c.Nodes[r.NodeID]
+func NewActivity(reg *node.Registry, task *engine.Task, r *engine.Run) (*Activity, error) {
+	if reg == nil {
+		return nil, fmt.Errorf("kernel: node registry required")
+	}
+	n, ok := findNode(task.Graph.Nodes, r.NodeID)
 	if !ok {
 		return nil, fmt.Errorf("kernel: run %s: node %q not in graph", r.RunID, r.NodeID)
 	}
 	key := node.RunKey{TaskID: r.TaskID, RunID: r.RunID, Seq: r.Seq, Attempt: r.Attempt}
-	if c.Inline[n.ID] {
+	if reg.Inline(n.Kind) {
 		return nil, fmt.Errorf("kernel: run %s: node %q is inline", r.RunID, n.ID)
 	}
-	exec, ok := c.Registry.ExecutorOf(n.Kind)
+	exec, ok := reg.ExecutorOf(n.Kind)
 	if !ok {
 		return nil, fmt.Errorf("kernel: run %s: node kind %q has no executor", r.RunID, n.Kind)
 	}
-	input, outs := maps.Clone(task.Input), r.Outputs.Clone()
-	vars, missing := c.project(n.ID, input, outs)
 	inj := task.Policy.Debug.InjectFor(n.ID)
-	if inj != nil {
-		maps.Copy(vars, inj.Vars)
-	}
-	params := c.resolveParams(n, vars, inj)
-	a := &Activity{Node: n, Vars: vars, Params: params, Key: key, exec: exec, failure: missing, lookup: lookup(input, outs)}
+	vars, missing := projectNodeInputs(reg, n, task.Input, r.Outputs, inj)
+	params := resolveNodeParams(reg, n, vars, inj)
+	a := &Activity{Node: n, Vars: vars, Params: params, Key: key, exec: exec, failure: missing, lookup: lookup(task.Input, r.Outputs)}
 	if task.Policy.NodeTimeoutMS > 0 {
 		a.Timeout = time.Duration(task.Policy.NodeTimeoutMS) * time.Millisecond
 	}
@@ -80,7 +78,7 @@ func (a *Activity) Run(ctx context.Context) (out node.NodeOutput, err error) {
 	}
 	return a.exec.Execute(ctx, node.NodeInput{
 		NodeID: a.Node.ID,
-		Vars:   maps.Clone(a.Vars),
+		Vars:   a.Vars,
 		Params: a.Params,
 		Key:    a.Key,
 		Lookup: a.lookup,
@@ -88,7 +86,7 @@ func (a *Activity) Run(ctx context.Context) (out node.NodeOutput, err error) {
 }
 
 // Done 用执行结果生成交回内核的 ActivityDone；RunID、Seq、Attempt 取自 Key，即准备调用时 Run 所在的执行。
-// 用法：kernel.Apply(c, task, runs, act.Done(act.Run(ctx)), env)。
+// 用法：kernel.Apply(reg, task, runs, act.Done(act.Run(ctx)), env)。
 func (a *Activity) Done(out node.NodeOutput, err error) ActivityDone {
 	return ActivityDone{
 		RunID: a.Key.RunID, Seq: a.Key.Seq, Attempt: a.Key.Attempt,

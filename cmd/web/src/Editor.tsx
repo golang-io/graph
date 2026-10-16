@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Redo2, Save, Undo2 } from 'lucide-react'
 import {
   edgesOnRemovedOutputs,
@@ -6,21 +6,25 @@ import {
   graphDecorationNodePack,
   graphEditorCanvasConfig,
   inputSourcesFor,
+  GraphNodeContextMenu,
   GraphNodePropsPanel,
   GraphPalette,
   GraphWorkbench,
   libraryDefaultConfig,
   insertionPosition,
   insertionScope,
+  loadStoredGraphHistory,
+  packSpecOf,
   parseGraphUI,
+  resolveEffectiveEndpoints,
   resolveEndpointSides,
   rotateEndpointSides,
   scopeGraphOf,
   scopedId,
-  resolveGraphNodeEndpoints,
   useGraphDocument,
   useGraphHistory,
   withEndpointSides,
+  withNodeEndpointSides,
   type GraphDefinition,
   type GraphNodePack,
   type EndpointSides,
@@ -35,13 +39,30 @@ type Props = {
 
 export default function Editor({ doc, pack, onSaved }: Props) {
   const activePack = useMemo(() => pack ?? graphDecorationNodePack, [pack])
-  const editor = useGraphDocument(doc)
+  const initialEditorDoc = useMemo(() => {
+    const stored = loadStoredGraphHistory(doc.GraphID)
+    const snap = stored?.entries?.[stored.index]?.snapshot
+    return snap ? { ...doc, Graph: snap.Graph, UI: snap.UI } : doc
+  }, [doc])
+  const editor = useGraphDocument(initialEditorDoc)
   const [saving, setSaving] = useState(false)
   const [savedToast, setSavedToast] = useState(false)
   const [error, setError] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  // 属性面板开关：单击只选中，打开属性走右键菜单「打开属性」
+  const [showNodeProps, setShowNodeProps] = useState(false)
+  const canvasContainerRef = useRef<HTMLDivElement>(null)
+  const [nodeContextMenu, setNodeContextMenu] = useState<{
+    x: number
+    y: number
+    nodeId: string
+  } | null>(null)
 
-  const history = useGraphHistory(50)
+  const history = useGraphHistory({
+    storageKey: doc.GraphID,
+    currentDocument: editor.document,
+    limit: 50,
+  })
   const captureBefore = useCallback(() => {
     if (history.isRestoring()) return
     history.push(editor.getDocument())
@@ -76,6 +97,9 @@ export default function Editor({ doc, pack, onSaved }: Props) {
         },
       ])
       setSelectedId(id)
+      // 从节点库新增后直接打开属性，便于立刻改配置
+      setShowNodeProps(true)
+      setNodeContextMenu(null)
     },
     [activePack, captureBefore, editor, selectedId],
   )
@@ -89,26 +113,19 @@ export default function Editor({ doc, pack, onSaved }: Props) {
   const patchEndpointSides = useCallback(
     (id: string, sides: EndpointSides) => {
       captureBefore()
-      editor.setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, endpointSides: sides } : n)))
+      editor.setNodes((ns) => withNodeEndpointSides(ns, id, sides))
     },
     [captureBefore, editor],
   )
 
-  const specOf = useCallback(
-    (type: string) => pack?.definitions.find((d) => d.nodeType === type)?.spec,
-    [pack],
-  )
+  // 按落图种类查种类描述（与 RunView 共用 ui 包的 packSpecOf，同一 spec 的 preset 条目共用同一份 spec）
+  const specOf = useCallback((type: string) => packSpecOf(pack, type), [pack])
   const selectedSpec = selectedNode ? specOf(selectedNode.type) : undefined
   // 选中节点在当前参数下的全部端点（switch 的分支随 Cases 变化），用于属性面板与 R 键旋转
   const selectedEndpoints = useMemo(
     () =>
       selectedNode
-        ? resolveGraphNodeEndpoints(
-            selectedNode.type,
-            selectedSpec?.Endpoints ?? activePack.registry.get(selectedNode.type)?.displayEndpoints,
-            selectedNode.config,
-            selectedSpec?.Renderer,
-          )
+        ? resolveEffectiveEndpoints(selectedNode.type, selectedSpec, activePack.registry, selectedNode.config)
         : undefined,
     [selectedNode, selectedSpec, activePack],
   )
@@ -122,7 +139,9 @@ export default function Editor({ doc, pack, onSaved }: Props) {
       const current = withEndpointSides(editor.getDocument(), activePack.registry)
       const saved = await api.save(doc.GraphID, { Name: doc.Name, Description: doc.Description, ...current })
       // 服务端返回规范化后的定义（含新版本号）；布局再经 parseGraphUI 过滤为画布认识的键。
-      onSaved({ ...saved, UI: parseGraphUI(saved.UI) })
+      const normalized = { ...saved, UI: parseGraphUI(saved.UI) }
+      editor.load(normalized)
+      onSaved(normalized)
       setSavedToast(true)
       setTimeout(() => setSavedToast(false), 1800)
     } catch (e) {
@@ -163,12 +182,12 @@ export default function Editor({ doc, pack, onSaved }: Props) {
     return () => window.removeEventListener('keydown', onKey)
   }, [selectedNode, selectedEndpoints, patchEndpointSides, save, onUndo, onRedo])
 
-  // 选中节点可引用的来源：运行输入与上游节点的输出（按当前未保存的图计算）。
+  // 选中节点可引用的来源：运行输入与上游节点的输出（仅依赖 Graph 结构与选中节点 ID，拖拽移动节点或缩放便签时不重算）。
   // 循环体内的节点只看所在循环体：上游为体内节点，运行输入为 item / index 与 map 的自定义输入。
   const selectedSources = useMemo(() => {
-    const at = selectedNode ? scopeGraphOf(editor.document, selectedNode.id) : undefined
+    const at = selectedId ? scopeGraphOf({ Graph: editor.document.Graph }, selectedId) : undefined
     return at ? inputSourcesFor(at.graph, at.localId, specOf) : []
-  }, [editor.document, selectedNode, specOf])
+  }, [editor.document.Graph, selectedId, specOf])
 
   return (
     <GraphWorkbench
@@ -220,14 +239,34 @@ export default function Editor({ doc, pack, onSaved }: Props) {
               {editor.document.Graph.Nodes.length} 节点 · {editor.document.Graph.Edges.length} 连线
             </span>
             <span className="hidden sm:inline text-muted-foreground/60">
-              · 选中节点按 R 旋转端点 · ⌘Z 后退 · ⌘S 保存
+              · 单击选中 · 右键打开属性 · 选中按 R 旋转端点 · ⌘Z 后退 · ⌘S 保存
             </span>
           </div>
         </div>
       }
       palette={<GraphPalette library={activePack.library} onAdd={addNode} />}
+      canvasContainerRef={canvasContainerRef}
+      canvasOverlay={
+        nodeContextMenu ? (
+          <GraphNodeContextMenu
+            x={nodeContextMenu.x}
+            y={nodeContextMenu.y}
+            title={nodeContextMenu.nodeId}
+            onClose={() => setNodeContextMenu(null)}
+            items={[
+              {
+                label: '打开属性',
+                onClick: () => {
+                  setSelectedId(nodeContextMenu.nodeId)
+                  setShowNodeProps(true)
+                },
+              },
+            ]}
+          />
+        ) : null
+      }
       propsPanel={
-        selectedNode ? (
+        selectedNode && showNodeProps ? (
           <GraphNodePropsPanel
             node={{
               id: selectedNode.id,
@@ -257,11 +296,11 @@ export default function Editor({ doc, pack, onSaved }: Props) {
               )
               // 参数改变出口集合时（删除 switch 分支），联动删除连在已移除出口上的边
               if (patch.config !== undefined) {
-                const outputs = resolveGraphNodeEndpoints(
+                const outputs = resolveEffectiveEndpoints(
                   selectedNode.type,
-                  selectedSpec?.Endpoints ?? activePack.registry.get(selectedNode.type)?.displayEndpoints,
+                  selectedSpec,
+                  activePack.registry,
                   patch.config,
-                  selectedSpec?.Renderer,
                 ).outputs
                 const stale = new Set(edgesOnRemovedOutputs(editor.edges, selectedNode.id, outputs).map((e) => e.id))
                 if (stale.size > 0) editor.setEdges((es) => es.filter((e) => !stale.has(e.id)))
@@ -274,8 +313,10 @@ export default function Editor({ doc, pack, onSaved }: Props) {
                 es.filter((e) => e.from !== selectedNode.id && e.to !== selectedNode.id),
               )
               setSelectedId(null)
+              setShowNodeProps(false)
+              setNodeContextMenu(null)
             }}
-            onClose={() => setSelectedId(null)}
+            onClose={() => setShowNodeProps(false)}
           />
         ) : undefined
       }
@@ -287,13 +328,33 @@ export default function Editor({ doc, pack, onSaved }: Props) {
         onViewChange: editor.setView,
         onBeforeEdit: captureBefore,
         canvas: graphEditorCanvasConfig,
+        // 单击仅选中，不自动打开属性面板
         onNodeClick: (_e, node) => {
           setSelectedId(node.id)
+          setNodeContextMenu(null)
         },
         onNodeDoubleClick: (_e, node) => {
           setSelectedId(node.id)
+          setNodeContextMenu(null)
         },
-        onPaneClick: () => setSelectedId(null),
+        onPaneClick: () => {
+          setSelectedId(null)
+          setShowNodeProps(false)
+          setNodeContextMenu(null)
+        },
+        interaction: {
+          onNodeContextMenu: (e, node) => {
+            const rect = canvasContainerRef.current?.getBoundingClientRect()
+            const clientX = 'clientX' in e ? e.clientX : 0
+            const clientY = 'clientY' in e ? e.clientY : 0
+            setSelectedId(node.id)
+            setNodeContextMenu({
+              x: clientX - (rect?.left ?? 0),
+              y: clientY - (rect?.top ?? 0),
+              nodeId: node.id,
+            })
+          },
+        },
       }}
     />
   )

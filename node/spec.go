@@ -1,8 +1,6 @@
 package node
 
 import (
-	"encoding/json"
-
 	"github.com/golang-io/graph"
 	"github.com/google/jsonschema-go/jsonschema"
 )
@@ -21,7 +19,7 @@ func DefaultEndpoints() EndpointSpec {
 // NodeSpec is the serializable catalog description of a node kind.
 type NodeSpec struct {
 	// ID 是种类身份：注册表主键，也是图实例 Nodes[].Kind 的取值。
-	// 后端：Register 按 ID 唯一入库；Lookup / Compile / Execute 用 Kind 反查本 Spec。
+	// 后端：Register 按 ID 唯一入库；Lookup / Validate / Execute 用 Kind 反查本 Spec。
 	// 前端：节点库与画布上的 nodeType；拖入画布时写入实例 Kind。
 	// 内置控制节点使用 __INNER__.{kind}；业务节点不得占用该前缀。
 	ID string `json:"ID"`
@@ -43,20 +41,23 @@ type NodeSpec struct {
 	GroupLabel string `json:"GroupLabel,omitempty"`
 
 	// DefaultInputs 是新建节点时的默认 Inputs（字面量为主）。
-	// 后端：Get/List 原样下发；Compile 不自动合并进实例。
+	// 后端：Get/List 原样下发；运行时不自动合并进实例。
 	// 前端：拖入画布时写入实例 Inputs。
 	DefaultInputs map[string]graph.InputRef `json:"DefaultInputs,omitempty"`
 
-	// paramsDecode 严格解码字面量参数对象，由 NodeSpec.decodeParams 调用；不序列化。
-	// paramsDecode decodes the literal inputs JSON object into the typed parameter struct.
-	paramsDecode func(json.RawMessage) (any, error) `json:"-"`
+	// paramsDecode 严格解码字面量参数，由 NodeSpec.decodeParams 调用；不序列化。
+	// paramsDecode decodes the literal inputs of a node instance into the typed parameter struct.
+	paramsDecode func(inputs map[string]graph.InputRef) (any, error) `json:"-"`
 
 	// paramsMerge 在节点参数字段存在动态绑定（From != ""）或调试注入覆盖时，
-	// 将运行期覆盖值合入编译期静态参数结构体副本；不序列化。
-	paramsMerge func(base any, overrides map[string]any) (any, error) `json:"-"`
+	// 将字面量输入与运行期覆盖值单次合并解码为参数结构体；不序列化。
+	paramsMerge func(inputs map[string]graph.InputRef, overrides map[string]any) (any, error) `json:"-"`
 
 	// paramFields 是参数结构体的导出 JSON 字段索引（字段名 → 结构体字段下标），只读；不序列化。
 	paramFields map[string]int `json:"-"`
+
+	// paramOnlyLiterals 记录无需作为运行期变量重复解码进 NodeInput.Vars 的静态复合参数字段（无 bind 标签的切片/结构体/指针/映射字段）。
+	paramOnlyLiterals map[string]bool `json:"-"`
 
 	// Icon / Tone / Renderer 是画布展示字段（图标键、色调、几何角色扩展点名）。
 	// 后端：Get/List 原样下发；不参与 Execute。
@@ -68,7 +69,7 @@ type NodeSpec struct {
 
 	// Endpoints 声明种类级固定端点上限（Inputs/Outputs）；Register 时至少声明一类。
 	// 后端：Register 校验；Registry.Endpoints 原样返回种类端点；实例实际启用的出口由 ActiveOutputsDeclarer
-	// 决定（见 Registry.NodeEndpoints），拓扑校验、画布句柄校验与编译索引均按实例端点工作。
+	// 决定（见 Registry.NodeEndpoints），拓扑校验与画布句柄校验均按实例端点工作。
 	// 前端：默认按 Spec.Endpoints 画句柄；动态分支节点（如 switch）按实例配置收敛启用出口。
 	// 效果：决定图上有哪些端点、能否保存非法连线、运行时走哪个出端点。
 	// 普通活动节点通常声明 Inputs:in、Outputs:out。

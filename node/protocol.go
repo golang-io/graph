@@ -46,16 +46,16 @@ const (
 	EventChildDone = "child_done" // 本节点启动的一个子任务结束（同时启动多个时逐个送达）
 )
 
-// NodeInput 是业务节点 Execute 的入参：身份、投影后的 Vars、编译期冻结的静态参数 Params、幂等键。
+// NodeInput 是业务节点 Execute 的入参：身份、投影后的 Vars、解码后的参数 Params、幂等键。
 // 不含图定义与输入引用表；也不含 Event/State（多轮协调见 ControlInput）。
-// Vars 已合入调试注入；执行器不得原地修改 Vars。
+// Vars 已合入调试注入；执行器不得原地修改 Vars（含嵌套值），需要局部变量表时自行复制。
 //
 // NodeInput is the business Execute argument (no Event/State).
 type NodeInput struct {
 	NodeID string         `json:"NodeID"` // 图上的节点实例 ID（graph.Node.ID；日志、错误消息）
 	Vars   map[string]any `json:"Vars"`
-	// Params 是编译期由 WithParams[T] 解码并冻结的节点静态参数结构体 T，执行期直接读取，不再反序列化 Vars。
-	// Params holds the static parameter struct T decoded once at compile time.
+	// Params 是由 WithParams[T] 解码的节点参数结构体 T（含动态绑定与调试注入覆盖），执行期直接通过 Params[T] 读取。
+	// Params holds the decoded parameter struct T for the node invocation.
 	Params any    `json:"-"`
 	Key    RunKey `json:"Key"`
 
@@ -65,14 +65,15 @@ type NodeInput struct {
 	Lookup func(ref graph.InputRef) (any, bool) `json:"-"`
 }
 
-// ControlInput 是控制节点 Control 的入参：在业务字段之外携带编译期静态参数 Params、框架组装的 Event 与 Run.State。
+// ControlInput 是控制节点 Control 的入参：在业务字段之外携带参数 Params、框架组装的 Event 与 Run.State。
 // 用于 map / subgraph 等需要等待子任务的多轮协调；单次推进的内置节点（switch/merge 等）仍走 Execute。
+// Vars 与 NodeInput.Vars 使用同一只读约定。
 //
 // ControlInput is the Control argument for multi-round coordination nodes.
 type ControlInput struct {
 	NodeID string          `json:"NodeID"` // 同 NodeInput.NodeID
 	Vars   map[string]any  `json:"Vars"`
-	Params any             `json:"-"` // 编译期由 WithParams[T] 解码并冻结的节点静态参数结构体 T
+	Params any             `json:"-"` // 由 WithParams[T] 解码的节点参数结构体 T
 	Event  Event           `json:"Event"`
 	State  json.RawMessage `json:"State,omitempty"` // 同一次访问中上一次 Control 返回的 State；首次为空
 }
@@ -158,62 +159,18 @@ func Wait(state json.RawMessage) NodeOutput {
 	return NodeOutput{State: state}
 }
 
-// OutcomeKind 是 NodeOutput 的封闭形态集合：除 Invalid 外恰为构造器对应的五种合法形态。
-// 新增形态必须在此加枚举并补全 Kind / ValidateShape / Leaves / 内核 applyOutput 的分支，编译器会暴露遗漏。
-type OutcomeKind string
-
-const (
-	OutcomeContinue OutcomeKind = "continue" // 可选 Set + 可选 Endpoint，无 Effect
-	OutcomeWait     OutcomeKind = "wait"     // 仅 State，无 Effect/Endpoint/Set
-	OutcomeSpawn    OutcomeKind = "spawn"    // EffectSpawn，可带 State
-	OutcomeFinish   OutcomeKind = "finish"   // Effect Finish，可带 State
-	OutcomeFail     OutcomeKind = "fail"     // Effect Fail，可带 State
-	OutcomeInvalid  OutcomeKind = "invalid"  // 互斥破坏或未知 Effect.Kind
-)
-
-// Kind 判别返回值的封闭形态：Effect 与 Set/Endpoint 并存、未知 Effect.Kind 均为 Invalid。
-func (o NodeOutput) Kind() OutcomeKind {
-	if o.Effect != nil {
-		if o.Endpoint != "" || len(o.Set) > 0 {
-			return OutcomeInvalid
-		}
-		switch strings.TrimSpace(o.Effect.Kind) {
-		case EffectSpawn:
-			return OutcomeSpawn
-		case EffectFinish:
-			return OutcomeFinish
-		case EffectFail:
-			return OutcomeFail
-		default:
-			return OutcomeInvalid
-		}
-	}
-	if o.Endpoint != "" || len(o.Set) > 0 {
-		return OutcomeContinue
-	}
-	return OutcomeWait
-}
-
-// ValidateShape 只校验互斥形态，不校验业务规则（输出名、端点是否声明由 OutputRule.Check 负责）：
-// Invalid 直接拒绝；Spawn/Finish/Fail 按 validateEffect 校验字段；其余形态无结构约束。
+// ValidateShape 只校验互斥形态，不校验业务规则（输出名、端点是否声明由 OutputRule.Check 负责）。
 func (o NodeOutput) ValidateShape() error {
-	switch o.Kind() {
-	case OutcomeInvalid:
-		if o.Effect != nil && (o.Endpoint != "" || len(o.Set) > 0) {
-			return fmt.Errorf("Effect cannot combine with Set or Endpoint")
-		}
-		return validateEffect(o.Effect)
-	case OutcomeSpawn, OutcomeFinish, OutcomeFail:
-		return validateEffect(o.Effect)
-	default:
+	if o.Effect == nil {
 		return nil
 	}
+	if o.Endpoint != "" || len(o.Set) > 0 {
+		return fmt.Errorf("Effect cannot combine with Set or Endpoint")
+	}
+	return validateEffect(o.Effect)
 }
 
 func validateEffect(eff *Effect) error {
-	if eff == nil {
-		return nil
-	}
 	switch strings.TrimSpace(eff.Kind) {
 	case EffectSpawn:
 		if len(eff.Spawns) == 0 {
@@ -221,18 +178,15 @@ func validateEffect(eff *Effect) error {
 		}
 		slots := make(map[string]bool, len(eff.Spawns))
 		for i, sp := range eff.Spawns {
-			// GraphID 与内嵌 Graph 恰选其一：前者按已保存版本解析，后者直接编译。
 			if (strings.TrimSpace(sp.GraphID) == "") == (sp.Graph == nil) {
 				return fmt.Errorf("spawn[%d] requires exactly one of GraphID and Graph", i)
 			}
-			// Slot 决定子任务结束时送回的 Event.Slot，重复会让结果对不上。
 			if slots[sp.Slot] {
 				return fmt.Errorf("spawn[%d] duplicate Slot %q", i, sp.Slot)
 			}
 			slots[sp.Slot] = true
 		}
 	case EffectFinish, EffectFail:
-		// finish / fail：无额外必填字段（fail 的 Message 可空，内核补默认文案）
 	default:
 		return fmt.Errorf("Effect.Kind %q invalid", eff.Kind)
 	}
@@ -240,19 +194,12 @@ func validateEffect(eff *Effect) error {
 }
 
 // Leaves 报告返回值是否会让 Run 离开当前节点（或结束）：
-// Spawn / Wait 仍停在本节点；Continue / Finish / Fail（以及非法形态 Invalid）计为离开。
-// 内核据此判定“子任务未结束时不得离开节点”，与 invoke 的等待检查及 Kind() 共用同一封闭形态定义。
-//
-// Leaves reports whether the output would cause the Run to leave the current node.
+// Spawn 与空 Set/Endpoint 的等待结果仍停在本节点；其余均计为离开。
 func (o NodeOutput) Leaves() bool {
-	switch o.Kind() {
-	case OutcomeSpawn, OutcomeWait:
-		return false
-	case OutcomeContinue, OutcomeFinish, OutcomeFail, OutcomeInvalid:
-		return true
-	default:
-		return true
+	if o.Effect != nil {
+		return strings.TrimSpace(o.Effect.Kind) != EffectSpawn
 	}
+	return o.Endpoint != "" || len(o.Set) > 0
 }
 
 // Node 是种类合同：至少提供 Spec。执行入口由 Executor 或 Controller 提供。

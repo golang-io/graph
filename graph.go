@@ -6,19 +6,12 @@ package graph
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 
+	"github.com/golang-io/graph/internal/jsonx"
 	"github.com/google/jsonschema-go/jsonschema"
 )
-
-// EndpointError 是失败捕获出端点的本地名（值为 "Error"）。
-// 仅声明了该出端点的节点（如 stop_error）可走 From 本地名为 Error 的出边。
-//
-// EndpointError is the local name of the failure-capture outgoing endpoint.
-const EndpointError = "Error"
-
-// ErrorField 是错误出口之后可用的输出名：节点失败并沿 Error 出边继续时写入 Outputs[节点ID]["Error"]。
-const ErrorField = "Error"
 
 // EndpointSep 分隔端点 ID 中的「节点 ID」与「本地端点名」：endpointID = nodeID + "." + name。
 //
@@ -26,7 +19,7 @@ const ErrorField = "Error"
 const EndpointSep = "."
 
 // FormatEndpointID 由节点 ID 与本地端点名拼出端点 ID：nodeID + "." + name。
-// 本地端点名（如 Out / In / Case0 / Error）不含 '.'，因此可用最后一个 '.' 反解。
+// 本地端点名（如 Out / In / Case0）不含 '.'，因此可用最后一个 '.' 反解。
 //
 // FormatEndpointID returns nodeID + "." + name (local endpoint name).
 func FormatEndpointID(nodeID, name string) string {
@@ -90,6 +83,32 @@ type Graph struct {
 	InputSchema  *jsonschema.Schema `json:"InputSchema,omitempty"`
 	Nodes        []Node             `json:"Nodes"`
 	Edges        []Edge             `json:"Edges"`
+}
+
+// Clone 深拷贝 Graph（含 InputSchema、Nodes 及其 Inputs、Edges），确保调用方后续修改不影响已保存或正在运行的图快照。
+func (g Graph) Clone() Graph {
+	out := g
+	out.InputSchema = jsonx.CloneSchema(g.InputSchema)
+	if g.Nodes != nil {
+		out.Nodes = make([]Node, len(g.Nodes))
+		for i, n := range g.Nodes {
+			if n.Inputs != nil {
+				inputs := make(map[string]InputRef, len(n.Inputs))
+				for k, ref := range n.Inputs {
+					if ref.Value != nil {
+						ref.Value = append(json.RawMessage(nil), ref.Value...)
+					}
+					inputs[k] = ref
+				}
+				n.Inputs = inputs
+			}
+			out.Nodes[i] = n
+		}
+	}
+	if g.Edges != nil {
+		out.Edges = slices.Clone(g.Edges)
+	}
+	return out
 }
 
 // filled 返回 Nodes / Edges 为 nil 时补成空切片的副本，使 nil 与空切片不会因编码为 null / [] 而被判为内容不同。
@@ -158,7 +177,7 @@ type Node struct {
 //	  - Value 为一段合法 JSON 原文（可为 null、标量、对象、数组）
 //
 // Value 使用 json.RawMessage 而非 any / map[string]any：
-// 定义库存的是未经二次解码的 JSON 字节，Compile 时再 DecodeStored 成具体值，
+// 定义库存的是未经二次解码的 JSON 字节，使用时再 DecodeStored 成具体值，
 // 避免 float64 吃掉整数、也避免在模型层引入开放结构。
 // 「这个字面量该是什么类型」不由 InputRef 表达，而由该输入名对应的
 // NodeSpec.InputSchema（或图级 InputSchema，当 From=$input）在 Resolve 阶段校验。
@@ -174,8 +193,8 @@ type InputRef struct {
 // 各分支持有独立的节点输出副本。边只决定执行走哪条路，不传递数据。
 //
 // From / To 都是端点 ID（endpointID = nodeID + "." + name）：
-// From 为来源节点的某个出端点（本地名承载分支语义：Out 默认出口、Case0..Case15 分支、
-// Error 失败捕获），To 为目标节点的某个入端点（通常为 In）。
+// From 为来源节点的某个出端点（本地名承载分支语义：Out 默认出口、Case0..Case15 分支），
+// To 为目标节点的某个入端点（通常为 In）。
 // 分支语义由 From 端点的本地名表达（见 ParseEndpointID）。
 //
 // Edge connects one output endpoint to one input endpoint; both From and To are endpoint IDs.
@@ -189,7 +208,7 @@ type Edge struct {
 // FromNode returns the node ID of the From endpoint.
 func (e Edge) FromNode() string { id, _, _ := ParseEndpointID(e.From); return id }
 
-// FromName 返回 From 端点的本地名（承载分支语义：Out/Case0/Error 等）。
+// FromName 返回 From 端点的本地名（承载分支语义：Out/Case0 等）。
 // FromName returns the local endpoint name of the From endpoint (branch semantics).
 func (e Edge) FromName() string { _, name, _ := ParseEndpointID(e.From); return name }
 

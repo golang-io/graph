@@ -1,8 +1,10 @@
 package engine
 
 import (
-	"maps"
+	"fmt"
 	"slices"
+
+	"github.com/golang-io/graph/internal/jsonx"
 )
 
 // DebugInject 调试时按输入名覆盖指定节点投影后的输入（Vars 的键为该节点 Inputs 中的输入名，
@@ -32,11 +34,34 @@ func (d *DebugOptions) Clone() *DebugOptions {
 	if len(d.Injects) > 0 {
 		out.Injects = make(map[string]DebugInject, len(d.Injects))
 		for id, inj := range d.Injects {
-			inj.Vars = maps.Clone(inj.Vars)
+			inj.Vars = cloneMap(inj.Vars)
 			out.Injects[id] = inj
 		}
 	}
 	return out
+}
+
+// Normalize 深拷贝调试选项，并将 Injects 中各节点的 Vars 规整为标准 JSON 形态（整数为 int64）；
+// Vars 不可序列化或包含越界数字时返回 ErrInvalid。
+//
+// Normalize deep-copies DebugOptions and normalizes each Injects[id].Vars via jsonx.CanonicalObject.
+func (d *DebugOptions) Normalize() (*DebugOptions, error) {
+	if d == nil {
+		return nil, nil
+	}
+	out := &DebugOptions{Step: d.Step, Breakpoints: slices.Clone(d.Breakpoints)}
+	if len(d.Injects) > 0 {
+		out.Injects = make(map[string]DebugInject, len(d.Injects))
+		for id, inj := range d.Injects {
+			vars, err := jsonx.CanonicalObject(inj.Vars)
+			if err != nil {
+				return nil, fmt.Errorf("%w: debug inject %s: %v", ErrInvalid, id, err)
+			}
+			inj.Vars = vars
+			out.Injects[id] = inj
+		}
+	}
+	return out, nil
 }
 
 // Active 报告是否启用了会停住执行的调试选项（单步或断点）；启用时 immediate 强制串行。

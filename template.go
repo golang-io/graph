@@ -1,5 +1,7 @@
 package graph
 
+import "strings"
+
 // ValidateTemplate 定义期检查文案插值：每个 {{…}} 括号内的表达式可编译。
 // 不检查标识符是否存在；按输入名检查见 ValidateTemplateWith。
 func ValidateTemplate(tpl string) error {
@@ -13,12 +15,23 @@ func ValidateTemplateWith(tpl string, names []string) error {
 	return checkTemplate(tpl, func(src string) error { return ValidateExprWith(src, names) })
 }
 
-// checkTemplate 对模板中的每个 {{…}} 插值调用 check。
+// checkTemplate 线性扫描模板中的每个 {{…}} 插值并调用 check，避免非贪婪正则状态机分配。
 func checkTemplate(tpl string, check func(string) error) error {
-	for _, match := range TemplateHoleRE.FindAllStringSubmatch(tpl, -1) {
-		if err := check(match[1]); err != nil {
+	pos := 0
+	for pos < len(tpl) {
+		open := strings.Index(tpl[pos:], "{{")
+		if open < 0 {
+			return nil
+		}
+		holeStart := pos + open + 2
+		closeRel := strings.Index(tpl[holeStart:], "}}")
+		if closeRel < 0 {
+			return nil
+		}
+		if err := check(tpl[holeStart : holeStart+closeRel]); err != nil {
 			return err
 		}
+		pos = holeStart + closeRel + 2
 	}
 	return nil
 }

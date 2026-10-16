@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -16,9 +17,9 @@ import (
 )
 
 // 调度模型（设计文档 8.2、8.3）：
-//   - Run 行即任务队列，不设单独的队列表。worker 轮流扫描分片，用索引 IdxRunClaim
-//     (EngineKind, Shard, Status, AvailableAt) 取到期的 PENDING Run。
-//   - 分片、租约、失联次数与已保存的结果是本引擎的策略数据，位于 DurableRun（列 Shard、LeaseUntil、LeaseToken、LostCount、Result）。
+//   - Run 行即任务队列，不设单独的队列表。worker 用索引 IdxRunClaim
+//     (EngineKind, Status, AvailableAt) 扫描到期的 PENDING Run。
+//   - 租约、失联次数与已保存的结果是本引擎的策略数据，位于 DurableRun（列 LeaseUntil、LeaseToken、LostCount、Result）。
 //   - 领取用条件更新（CAS）：UPDATE ... SET Status=RUNNING, LeaseUntil, LeaseToken=LeaseToken+1
 //     WHERE RunID AND Status=PENDING AND LeaseToken=读到的值 AND AvailableAt<=now；影响 1 行即领取成功。
 //     领取不锁 Task 行，不与写回互相阻塞（写回对此的处理见 store.go）。
@@ -27,7 +28,8 @@ import (
 //   - 执行结束后分两步：先用单行条件更新把结果写入自己的 Run（DurableRun.Result，条件 RUNNING 且 LeaseToken 一致，不锁 Task 行），
 //     再以 ActivityDone 写回（store.go 的 event）。第二步失败或进程在两步之间退出时结果不丢失，
 //     恢复扫描在租约过期后直接应用它（recover.go），节点不会因此重新执行。
-//   - 写回中新出现的到期 Run 由本 worker 直接接力领取一个。
+//   - 写回中新出现的 PENDING Run 通过 kickAll 唤醒本进程空闲的 worker。
+//   - 领取与恢复扫描遇到数据库错误时按带抖动的指数退避等待，避免数据库故障期间高频空转。
 
 // job 标识一个 Run 及其租约令牌，领取查询、lease、恢复扫描与执行共用；字段直接接收 tb_graph_run 的同名列。
 // LeaseToken 的含义取决于来源：
@@ -47,114 +49,107 @@ type job struct {
 const claimBatch = 8
 
 // schedule 启动 worker 并按 LeaseDuration/3 运行恢复扫描，阻塞到 stop 取消且所有 worker 退出。
+// 恢复扫描报错时按带抖动的指数退避延长下次扫描间隔，成功后恢复默认间隔。
 // 由构造函数在后台启动，Close 等待它返回。
 func (e *Engine) schedule() {
 	var wg sync.WaitGroup
-	for i := range e.opt.Workers {
-		wg.Go(func() { e.worker(i) })
+	for range e.opt.Workers {
+		wg.Go(e.worker)
 	}
-	tick := time.NewTicker(e.opt.LeaseDuration / 3)
-	defer tick.Stop()
+	base := e.opt.LeaseDuration / 3
+	timer := time.NewTimer(base)
+	defer timer.Stop()
+
+	failures := 0
 	for {
 		select {
 		case <-e.stop.Done():
 			wg.Wait()
 			return
-		case <-tick.C:
-			if err := e.recoverOnce(); err != nil && e.stop.Err() == nil {
-				e.cfg.Fail(fmt.Errorf("durable: recover: %w", err))
+		case <-timer.C:
+			delay := base
+			if err := e.recoverOnce(); err != nil {
+				if e.stop.Err() == nil {
+					e.cfg.Fail(fmt.Errorf("durable: recover: %w", err))
+				}
+				failures++
+				delay = backoff(base, failures)
+			} else {
+				failures = 0
 			}
+			timer.Reset(delay)
 		}
 	}
 }
 
-// workerShards 返回 worker 负责轮询的分片列表。
-// 当 Workers >= Shards 时每个 worker 绑定单个分片 idx % Shards；
-// 当 Workers < Shards 时，各分片均匀分摊到不同 worker，确保所有分片都被覆盖。
-func (e *Engine) workerShards(idx int) []int {
-	var shards []int
-	for s := idx; s < e.opt.Shards; s += e.opt.Workers {
-		shards = append(shards, s)
-	}
-	if len(shards) == 0 {
-		shards = []int{idx % e.opt.Shards}
-	}
-	return shards
-}
-
-// worker 轮询绑定的分片领取 Run；空闲时采用自适应指数退避与定时器复用减少空闲轮询和 GC 压力。
-// 已领取的 Run 总是执行完（含接力领取的），stop 只阻止新的领取。
-func (e *Engine) worker(idx int) {
-	shards := e.workerShards(idx)
-	shardPos := 0
-
-	minInterval := e.opt.PollInterval
-	maxInterval := max(minInterval, min(time.Second, minInterval*20))
-	interval := minInterval
-
-	timer := time.NewTimer(interval)
+// worker 持续领取到期的 PENDING Run 并执行；已领取的 Run 总是执行完，stop 只阻止新的领取。
+// 无可领取 Run 时等待 kick 唤醒或 PollInterval 到期；领取报错时按带抖动的指数退避等待（期间不响应 kick）。
+func (e *Engine) worker() {
+	timer := time.NewTimer(0)
 	defer timer.Stop()
 
+	failures := 0
 	for e.stop.Err() == nil {
-		var j *job
-		for range shards {
-			s := shards[shardPos]
-			shardPos = (shardPos + 1) % len(shards)
-			var err error
-			j, err = e.claim(s)
-			if err != nil && e.stop.Err() == nil {
-				e.cfg.Fail(fmt.Errorf("durable: claim: %w", err))
-			}
-			if j != nil {
-				break
-			}
-		}
-
+		j, err := e.claim()
 		if j != nil {
-			interval = minInterval
-			for j != nil {
-				j = e.process(j)
+			failures = 0
+			e.process(j)
+			select {
+			case <-e.kick:
+			default:
 			}
 			continue
 		}
-
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
+		delay := e.opt.PollInterval
+		kick := e.kick
+		if err != nil {
+			if e.stop.Err() == nil {
+				e.cfg.Fail(fmt.Errorf("durable: claim: %w", err))
 			}
+			failures++
+			delay = backoff(delay, failures)
+			kick = nil
+		} else {
+			failures = 0
 		}
-		timer.Reset(interval)
-
+		timer.Reset(delay)
 		select {
 		case <-e.stop.Done():
 			return
-		case <-e.kick:
-			interval = minInterval
+		case <-kick:
 		case <-timer.C:
-			select {
-			case <-e.kick:
-				interval = minInterval
-			default:
-				interval = min(maxInterval, interval*2)
-			}
 		}
 	}
 }
 
-// claim 从分片中领取一个到期的 PENDING Run。
-func (e *Engine) claim(shard int) (*job, error) {
+// backoff 返回第 failures 次连续失败（从 1 开始）的带抖动指数退避时长：
+// 上限按 2^failures 倍增（不超过 [5s, 1m] 封顶值），在 [max(base, ceil/2), ceil) 内随机抖动，错开多 worker 的重试时刻。
+func backoff(base time.Duration, failures int) time.Duration {
+	limit := min(time.Minute, max(5*time.Second, base*16))
+	ceil := min(base<<min(failures, 6), limit)
+	floor := max(base, ceil/2)
+	return floor + rand.N(max(ceil-floor, 1))
+}
+
+// claim 领取一个到期的 PENDING Run。
+// 从候选批次的随机下标开始环状尝试 lease，降低多 worker 同时扫描同一批次时的 CAS 竞争。
+func (e *Engine) claim() (*job, error) {
 	now := e.cfg.Now().UnixMilli()
 	var pending []job
 	err := e.cfg.DB.Model(&DurableRun{}).Select("RunID", "TaskID", "LeaseToken").
-		Where(map[string]any{"EngineKind": engine.KindDurable, "Shard": shard, "Status": graph.PENDING}).
+		Where(map[string]any{"EngineKind": engine.KindDurable, "Status": graph.PENDING}).
 		Where(clause.Lte{Column: engine.Col("AvailableAt"), Value: now}).
 		Order(engine.Asc("AvailableAt")).Limit(claimBatch).Find(&pending).Error
 	if err != nil {
 		return nil, err
 	}
-	for _, p := range pending {
-		j, err := e.lease(p, now)
+	n := len(pending)
+	if n == 0 {
+		return nil, nil
+	}
+	start := rand.IntN(n)
+	for i := range n {
+		j, err := e.lease(pending[(start+i)%n], now)
 		if err != nil {
 			return nil, err
 		}
@@ -190,18 +185,45 @@ func (e *Engine) lease(j job, now int64) (*job, error) {
 	return &j, nil
 }
 
-// process 执行一个已领取的 Run 并完成提交后的处理，返回接力领取的下一个 Run。
-func (e *Engine) process(j *job) *job {
-	b, err := e.execute(j)
-	if err != nil {
-		e.cfg.Fail(fmt.Errorf("durable: run %s: %w", j.RunID, err))
+// process 执行已领取的 Run 并完成提交后的处理；写回产生本 Task 新的到期 PENDING Run 时直接接力领取执行，
+// 省去返回主循环重新做全表 SELECT claim 查询。
+func (e *Engine) process(j *job) {
+	for j != nil && e.stop.Err() == nil {
+		b, err := e.execute(j)
+		if err != nil {
+			e.cfg.Fail(fmt.Errorf("durable: run %s: %w", j.RunID, err))
+			return
+		}
+		if b == nil {
+			return
+		}
+		e.settle(b)
+		j = e.relay(b)
+	}
+}
+
+// relay 从刚刚提交的 batch 中直接按 CAS 接力领取一个已到期的 PENDING Run；无可用 Run 或领取未命中时返回 nil。
+func (e *Engine) relay(b *batch) *job {
+	if e.stop.Err() != nil || len(b.runs) == 0 {
 		return nil
 	}
-	if b == nil {
-		return nil
+	now := e.cfg.Now().UnixMilli()
+	for _, r := range b.runs {
+		if r.Status != graph.PENDING || r.AvailableAt > now {
+			continue
+		}
+		j, err := e.lease(job{RunID: r.RunID, TaskID: r.TaskID, LeaseToken: r.LeaseToken}, now)
+		if err != nil {
+			if e.stop.Err() == nil {
+				e.cfg.Fail(fmt.Errorf("durable: relay: %w", err))
+			}
+			return nil
+		}
+		if j != nil {
+			return j
+		}
 	}
-	e.settle(b)
-	return e.relay(b)
+	return nil
 }
 
 // execute 执行已领取的活动节点：事务外执行并续租，结束后先保存结果（saveResult），再写回应用它。
@@ -218,22 +240,18 @@ func (e *Engine) execute(j *job) (*batch, error) {
 	stop := func() { cancel(); <-beat }
 	defer stop()
 
-	t, err := engine.LoadTask(e.cfg.DB, j.TaskID, false)
+	t, err := engine.LoadTask(e.cfg.DB.WithContext(ctx), j.TaskID, true)
 	if err != nil {
 		return nil, err
 	}
 	var r DurableRun
-	if err := e.cfg.DB.Where(map[string]any{"RunID": j.RunID}).Take(&r).Error; err != nil {
+	if err := e.cfg.DB.WithContext(ctx).Where(map[string]any{"RunID": j.RunID}).Take(&r).Error; err != nil {
 		return nil, err
 	}
 	if r.Status != graph.RUNNING || r.LeaseToken != j.LeaseToken {
 		return nil, nil
 	}
-	c, err := e.compiled(e.cfg.DB, t)
-	if err != nil {
-		return nil, err
-	}
-	a, err := kernel.NewActivity(c, t, &r.Run)
+	a, err := kernel.NewActivity(e.cfg.Nodes, t, &r.Run)
 	if err != nil {
 		stop()
 		return e.event(context.Background(), j.TaskID, owned(j, func(*DurableRun) act { return act{fail: err} }))
@@ -341,13 +359,26 @@ func (e *Engine) heartbeat(ctx context.Context, cancel context.CancelFunc, j *jo
 				return
 			case <-tick.C:
 			}
-			nextUntil := e.cfg.Now().Add(e.opt.LeaseDuration).UnixMilli()
-			res := e.cfg.DB.Model(&DurableRun{}).
+			now := e.cfg.Now()
+			rem := time.Duration(leaseUntil-now.UnixMilli()) * time.Millisecond
+			if rem <= 0 {
+				cancel()
+				return
+			}
+			nextUntil := now.Add(e.opt.LeaseDuration).UnixMilli()
+			qctx, qcancel := context.WithTimeout(ctx, rem)
+			expireTimer := time.AfterFunc(rem, cancel)
+			res := e.cfg.DB.WithContext(qctx).Model(&DurableRun{}).
 				Where(map[string]any{"RunID": j.RunID, "Status": graph.RUNNING, "LeaseToken": j.LeaseToken}).
 				Update("LeaseUntil", nextUntil)
+			expireTimer.Stop()
+			qcancel()
 			if res.Error != nil {
+				if ctx.Err() != nil && e.stop.Err() != nil {
+					return
+				}
 				e.cfg.Fail(fmt.Errorf("durable: heartbeat run %s: %w", j.RunID, res.Error))
-				if e.cfg.Now().UnixMilli() >= leaseUntil {
+				if e.cfg.Now().UnixMilli() >= leaseUntil || errors.Is(res.Error, context.DeadlineExceeded) {
 					cancel()
 					return
 				}
@@ -361,24 +392,6 @@ func (e *Engine) heartbeat(ctx context.Context, cancel context.CancelFunc, j *jo
 		}
 	}()
 	return done
-}
-
-// relay 从本次写入的 Run 中取第一个到期的 PENDING Run 直接领取，省去一次轮询；其余留给其他 worker。
-// 引擎正在关闭时不再领取。
-func (e *Engine) relay(b *batch) *job {
-	if e.stop.Err() != nil {
-		return nil
-	}
-	now := e.cfg.Now().UnixMilli()
-	for _, r := range b.runs {
-		if r.Status != graph.PENDING || r.AvailableAt > now || r.EngineKind != engine.KindDurable {
-			continue
-		}
-		if j, err := e.lease(job{RunID: r.RunID, TaskID: r.TaskID, LeaseToken: r.LeaseToken}, now); err == nil && j != nil {
-			return j
-		}
-	}
-	return nil
 }
 
 // localExec 是本进程内一次执行中的活动节点。

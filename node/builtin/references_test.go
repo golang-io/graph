@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/golang-io/graph"
-	"github.com/golang-io/graph/internal/jsonx"
 	"github.com/golang-io/graph/node"
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 // dfNode 构造测试节点；cfg 为 nil 时不带参数字面量；非 nil 时与 inputs 合并进 Inputs。
@@ -81,7 +81,10 @@ func dfRegistry() *node.Registry {
 // mutate 在循环体上修改出待测的错误。
 func mapBody(mutate func(g *graph.Graph)) graph.Graph {
 	g := graph.Graph{
-		InputSchema: graph.RunInputSchema(MapItemField, "greeting"),
+		InputSchema: graph.RunInputSchema(map[string]*jsonschema.Schema{
+			MapItemField: graph.AnyValueSchema(),
+			"greeting":   {Type: "string"},
+		}),
 		Nodes: []graph.Node{
 			dfNode("start", Start, nil, nil),
 			dfTemplate("body", "v", "{{greeting}}:{{item}}", dfRefs{
@@ -104,7 +107,10 @@ func mapGraph(mutate func(g *graph.Graph)) graph.Graph {
 
 func mapGraphWith(body graph.Graph, mutate func(g *graph.Graph)) graph.Graph {
 	g := graph.Graph{
-		InputSchema: graph.RunInputSchema("name", "items"),
+		InputSchema: graph.RunInputSchema(map[string]*jsonschema.Schema{
+			"name":  {Type: "string"},
+			"items": {Type: "array", Items: graph.AnyValueSchema()},
+		}),
 		Nodes: []graph.Node{
 			dfNode("start", Start, nil, nil),
 			dfTemplate("greet", "greeting", "hi {{name}}", dfRefs{"name": {From: graph.InputSource, Field: "name"}}),
@@ -187,9 +193,12 @@ func TestReferencesValidation(t *testing.T) {
 		"template uses undeclared name": {mapGraph(func(g *graph.Graph) {
 			setInput(g, "after", "greeting", graph.InputRef{})
 		}), `unknown name greeting`},
-		"error field on normal path": {mapGraph(func(g *graph.Graph) {
-			setInput(g, "after", "e", graph.InputRef{From: "greet", Field: graph.ErrorField})
-		}), `node "greet" has no output "Error"`},
+		"non-merge multiple incoming edges rejected": {mapGraph(func(g *graph.Graph) {
+			g.Edges = append(g.Edges, dfEdge("greet", "after"))
+		}), `cannot have multiple incoming edges (use a merge node)`},
+		"undeclared target input endpoint rejected": {mapGraph(func(g *graph.Graph) {
+			g.Edges[0].To = "greet.DoesNotExist"
+		}), `targets undeclared input "DoesNotExist"`},
 		"orphan not reachable from start": {mapGraph(func(g *graph.Graph) {
 			g.Nodes = append(g.Nodes, dfTemplate("orphan", "o", "o", nil))
 			g.Edges = append(g.Edges, dfEdge("orphan", "end"))
@@ -222,7 +231,7 @@ func TestReferencesLLMFields(t *testing.T) {
 	registry := dfRegistry()
 	base := func(inputs dfRefs) graph.Graph {
 		return graph.Graph{
-			InputSchema: graph.RunInputSchema("q"),
+			InputSchema: graph.RunInputSchema(graph.StringProps("q")),
 			Nodes: []graph.Node{
 				dfNode("start", Start, nil, nil),
 				dfNode("ask", LLM, LLMInput{Model: "m", Prompt: "{{Query}}"}, inputs),
@@ -246,80 +255,35 @@ func TestReferencesLLMFields(t *testing.T) {
 	}
 }
 
-// 错误出口之后可以引用 error；字面量输入不需要来源。
-func TestReferencesErrorFieldAndLiteral(t *testing.T) {
+// 字面量输入不需要来源；stop_error 为终止节点，不能有后继出边。
+func TestReferencesStopErrorTerminalAndLiteral(t *testing.T) {
 	registry := dfRegistry()
 	g := graph.Graph{
 		Nodes: []graph.Node{
 			dfNode("start", Start, nil, nil),
-			dfNode("boom", StopError, StopErrorInput{Message: "x"}, nil),
-			dfTemplate("fix", "msg", "{{error}}/{{tag}}", dfRefs{
-				"error": {From: "boom", Field: graph.ErrorField}, "tag": {Value: json.RawMessage(`"lit"`)}}),
+			dfTemplate("fix", "msg", "{{tag}}", dfRefs{"tag": {Value: json.RawMessage(`"lit"`)}}),
 			dfNode("end", End, nil, dfRefs{"msg": {From: "fix", Field: "msg"}}),
 		},
-		Edges: []graph.Edge{dfEdge("start", "boom"), dfEdge("boom", "fix", graph.EndpointError), dfEdge("fix", "end")},
+		Edges: []graph.Edge{dfEdge("start", "fix"), dfEdge("fix", "end")},
 	}
 	if err := registry.Validate(g); err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-}
-
-// 各类节点的出口载荷：固定 OutputsByEndpoint、由配置推导、开启错误出口后追加 error。
-func TestNodeOutputTables(t *testing.T) {
-	registry := dfRegistry()
-	// want: 有序 [name, endpoint] 对；endpoint 空表示 EndpointPayloadDefault（所有正常出口）。
-	type pair [2]string
-	cases := []struct {
-		n    graph.Node
-		want []pair
-	}{
-		{dfNode("t", Template, TemplateInput{Outputs: []graph.OutKV{{Key: "a", Value: "x"}, {Key: "b", Value: "y"}}}, nil),
-			[]pair{{"a", ""}, {"b", ""}}},
-		{dfNode("c", Code, CodeInput{Outputs: []graph.OutKV{{Key: "n", Value: "1"}}}, nil),
-			[]pair{{"n", ""}}},
-		{dfNode("m", Map, MapInput{}, nil), []pair{{MapResultsField, ""}}},
-		{dfNode("r", Reduce, ReduceInput{Expr: ReduceAccLocal}, nil), []pair{{ReduceResultField, ""}}},
-		{dfNode("s", SubGraph, SubGraphInput{GraphID: "g"}, nil),
-			[]pair{{SubGraphOutputField, ""}, {SubGraphGraphIDField, ""}}},
-		{dfNode("h", HTTP, HTTPInput{URL: "https://example.com"}, nil),
-			[]pair{{"Body", ""}, {"Status", ""}, {"OK", ""}}},
-		{dfNode("l", LLM, LLMInput{Model: "m", Prompt: "p"}, nil), []pair{{LLMTextField, ""}}},
-		{dfNode("g", Merge, MergeInput{Outputs: []MergeFirstField{{Name: "v", First: []graph.InputRef{{From: "a", Field: "v"}}}}}, nil),
-			[]pair{{"v", ""}}},
-		{dfNode("x", StopError, StopErrorInput{Message: "m"}, nil), []pair{{graph.ErrorField, graph.EndpointError}}},
-		{dfNode("s0", Start, nil, nil), nil},
-		{dfNode("e", End, nil, nil), nil},
-		{dfNode("sw", Switch, SwitchInput{Expr: "true"}, nil), nil},
+	badStop := graph.Graph{
+		Nodes: []graph.Node{
+			dfNode("start", Start, nil, nil),
+			dfNode("boom", StopError, StopErrorInput{Message: "x"}, nil),
+			dfNode("end", End, nil, nil),
+		},
+		Edges: []graph.Edge{dfEdge("start", "boom"), dfEdge("boom", "end")},
 	}
-	for _, tc := range cases {
-		got, err := registry.Outputs(tc.n)
-		if err != nil {
-			t.Fatalf("%s: %v", tc.n.Kind, err)
-		}
-		byName := map[string]string{}
-		for ep, schema := range got {
-			for _, name := range jsonx.PropertyNames(schema) {
-				byName[name] = ep
-			}
-		}
-		if len(byName) != len(tc.want) {
-			g, _ := json.Marshal(byName)
-			w, _ := json.Marshal(tc.want)
-			t.Errorf("%s outputs = %s, want %s", tc.n.Kind, g, w)
-			continue
-		}
-		for _, p := range tc.want {
-			if byName[p[0]] != p[1] {
-				g, _ := json.Marshal(byName)
-				w, _ := json.Marshal(tc.want)
-				t.Errorf("%s outputs = %s, want %s", tc.n.Kind, g, w)
-				break
-			}
-		}
+	if err := registry.Validate(badStop); err == nil || !strings.Contains(err.Error(), "terminal node cannot have successors") {
+		t.Fatalf("stop_error with successor err = %v", err)
 	}
 }
 
 // 入口规则：必须有且仅有一个无入边的 start；start → map 合法。
+// Registry.Outputs 的契约用例在 test/node（TestNodeOutputTables）。
 func TestEntryRule(t *testing.T) {
 	registry := dfRegistry()
 	noStart := graph.Graph{
@@ -390,11 +354,11 @@ func TestValidateLoopDiamondCost(t *testing.T) {
 	}
 }
 
-// loopDiamondGraph 构造 map 循环体内 levels 层菱形分叉的图：每层 f 分叉到 a、b，再汇入下一层的 f。
+// loopDiamondGraph 构造 map 循环体内 levels 层菱形分叉的图：每层 f 分叉到 a、b，经 merge 汇入下一层。
 func loopDiamondGraph(levels int) graph.Graph {
 	body := graph.Graph{Nodes: []graph.Node{dfNode("start", Start, nil, nil)}, Edges: []graph.Edge{dfEdge("start", "f0")}}
 	for i := range levels {
-		f, a, b := fmt.Sprintf("f%d", i), fmt.Sprintf("a%d", i), fmt.Sprintf("b%d", i)
+		f, a, b, m := fmt.Sprintf("f%d", i), fmt.Sprintf("a%d", i), fmt.Sprintf("b%d", i), fmt.Sprintf("m%d", i)
 		next := "end"
 		if i+1 < levels {
 			next = fmt.Sprintf("f%d", i+1)
@@ -402,11 +366,14 @@ func loopDiamondGraph(levels int) graph.Graph {
 		for _, id := range []string{f, a, b} {
 			body.Nodes = append(body.Nodes, dfNode(id, "probe", nil, nil))
 		}
-		body.Edges = append(body.Edges, dfEdge(f, a), dfEdge(f, b), dfEdge(a, next), dfEdge(b, next))
+		body.Nodes = append(body.Nodes, dfNode(m, Merge, MergeInput{Mode: node.JoinAll}, nil))
+		body.Edges = append(body.Edges, dfEdge(f, a), dfEdge(f, b), dfEdge(a, m), dfEdge(b, m), dfEdge(m, next))
 	}
 	body.Nodes = append(body.Nodes, dfNode("end", End, nil, nil))
 	return graph.Graph{
-		InputSchema: graph.RunInputSchema("items"),
+		InputSchema: graph.RunInputSchema(map[string]*jsonschema.Schema{
+			"items": {Type: "array", Items: graph.AnyValueSchema()},
+		}),
 		Nodes: []graph.Node{
 			dfNode("start", Start, nil, nil),
 			dfNode("loop", Map, MapInput{Body: &body}, dfRefs{MapListField: {From: graph.InputSource, Field: "items"}}),

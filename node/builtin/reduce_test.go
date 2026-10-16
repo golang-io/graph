@@ -32,8 +32,12 @@ func TestApplyReduceSum(t *testing.T) {
 
 func TestReduceExecutor(t *testing.T) {
 	// 自定义输入 sep 可在 Init 与 Expr 中使用；输出只有 result。
+	vars := map[string]any{
+		ReduceListField: []any{"a", "b", "c"}, "sep": "-",
+		ReduceAccLocal: "outer acc", ReduceItemLocal: "outer item", ReduceIndexLocal: int64(42),
+	}
 	out, err := ReduceNode{}.Execute(context.Background(), node.NodeInput{
-		Vars:   map[string]any{ReduceListField: []any{"a", "b", "c"}, "sep": "-"},
+		Vars:   vars,
 		Params: ReduceInput{Init: `sep`, Expr: `Acc + Item + sep`},
 	})
 	if err != nil {
@@ -41,5 +45,8 @@ func TestReduceExecutor(t *testing.T) {
 	}
 	if len(out.Set) != 1 || out.Set[ReduceResultField] != "-a-b-c-" {
 		t.Fatalf("output = %v", out.Set)
+	}
+	if vars[ReduceAccLocal] != "outer acc" || vars[ReduceItemLocal] != "outer item" || vars[ReduceIndexLocal] != int64(42) {
+		t.Fatalf("reduce locals overwrote caller vars: %v", vars)
 	}
 }

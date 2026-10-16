@@ -12,7 +12,7 @@ import (
 	"github.com/golang-io/graph/node"
 )
 
-// 本文件是只依赖图结构的导航辅助：出边匹配、错误出口、汇合点分析、汇合输出合并。
+// 本文件是只依赖图结构的导航辅助：出边匹配、必经汇合点判断与汇合输出合并。
 
 // matchingOutEdges 返回本次节点成功退出应激活的全部边。
 // branch 为空时按默认出口 Out 处理；匹配 From 端点本地名等于 branch 的出边；
@@ -54,102 +54,46 @@ func errNoMatchingOutgoing(nodeID, branch string, edges []graph.Edge) error {
 	return fmt.Errorf("node %s has no matching outgoing edge (branch=%q, have [%s])", nodeID, branch, strings.Join(have, ", "))
 }
 
-// findErrorEdge 精确匹配 From 端点本地名为 Error 的出边（不回落到其他出边）。
-// 节点失败时有这条边就沿它继续；拓扑校验保证只有声明了 Error 出口的节点才能连 Error 出边。
-func findErrorEdge(edges []graph.Edge) (graph.Edge, bool) {
-	for _, edge := range edges {
-		if edge.FromName() == graph.EndpointError {
-			return edge, true
-		}
+// onlyLeadsTo 报告从节点 start 出发的所有控制流路径是否都必须经过 target。
+// 主图无环（DAG）：当 start 等于 target，或 start 存在出边且每条出边都通向 target 时返回 true。
+// 供 Merge(any) 在首条入边触发后跳过仅通向该汇合节点的未完成上游分支。
+func onlyLeadsTo(outEdges map[string][]graph.Edge, start, target string) bool {
+	if start == target {
+		return true
 	}
-	return graph.Edge{}, false
+	return onlyLeadsToMemo(outEdges, start, target, map[string]bool{})
 }
 
-// errorOutputs 是节点走错误出口时写入 Run.Outputs[节点ID] 的输出：只有 Error（失败信息）。
-// 下游通过 {"From": 节点ID, "Field": "Error"} 引用，且只能位于 Error 出端点的出边之后。
-func errorOutputs(msg string) map[string]any {
-	return map[string]any{graph.ErrorField: msg}
+func onlyLeadsToMemo(outEdges map[string][]graph.Edge, start, target string, memo map[string]bool) bool {
+	if start == target {
+		return true
+	}
+	var check func(string) bool
+	check = func(id string) bool {
+		if id == target {
+			return true
+		}
+		if v, ok := memo[id]; ok {
+			return v
+		}
+		outs := outEdges[id]
+		if len(outs) == 0 {
+			memo[id] = false
+			return false
+		}
+		memo[id] = false
+		for _, e := range outs {
+			if !check(e.ToNode()) {
+				return false
+			}
+		}
+		memo[id] = true
+		return true
+	}
+	return check(start)
 }
 
-// commonJoinTarget 返回所有分支共同到达的最近汇入节点；空表示分支独立结束。
-// 声明了汇合方式（merge）或有多条入边的节点都可作为汇入候选；joinModes 来自 Compiled.JoinModes。
-// 每个候选按节点记忆化可达性与距离，复杂度与节点数成线性，不随路径数指数增长。
-func commonJoinTarget(joinModes map[string]string, eps map[string]node.EndpointSpec, nodes map[string]graph.Node, outEdges, inEdges map[string][]graph.Edge, sourceEdges []graph.Edge) string {
-	candidates := make([]string, 0)
-	for id := range nodes {
-		if joinModes[id] != "" || len(inEdges[id]) > 1 {
-			candidates = append(candidates, id)
-		}
-	}
-	sort.Strings(candidates)
-
-	type reach struct {
-		ok       bool
-		distance int
-	}
-	best := ""
-	bestDistance := int(^uint(0) >> 1)
-	for _, candidate := range candidates {
-		visiting := map[string]bool{}
-		memo := map[string]reach{}
-		var reaches func(string) (bool, int)
-		reaches = func(id string) (bool, int) {
-			if id == candidate {
-				return true, 0
-			}
-			if r, done := memo[id]; done {
-				return r.ok, r.distance
-			}
-			if visiting[id] {
-				return false, 0
-			}
-			visiting[id] = true
-			r := reach{}
-			r.ok, r.distance = joinChildren(eps[id], outEdges[id], reaches)
-			delete(visiting, id)
-			memo[id] = r
-			return r.ok, r.distance
-		}
-
-		valid := true
-		distance := 0
-		for _, edge := range sourceEdges {
-			ok, childDistance := reaches(edge.ToNode())
-			if !ok {
-				valid = false
-				break
-			}
-			if childDistance > distance {
-				distance = childDistance
-			}
-		}
-		if valid && distance < bestDistance {
-			best = candidate
-			bestDistance = distance
-		}
-	}
-	return best
-}
-
-// joinChildren 计算节点的所有出边是否都汇入候选，以及到候选的最远距离。
-func joinChildren(ep node.EndpointSpec, out []graph.Edge, reaches func(string) (bool, int)) (bool, int) {
-	if ep.IsTerminal() || len(out) == 0 {
-		return false, 0
-	}
-	distance := 0
-	for _, edge := range out {
-		ok, childDistance := reaches(edge.ToNode())
-		if !ok {
-			return false, 0
-		}
-		if childDistance > distance {
-			distance = childDistance
-		}
-	}
-	return true, distance + 1
-}
-
-// mergeArrivals 按 Slot 升序合并各分支到达时的节点输出：分叉前的节点在各分支相同，分叉后的节点互不重叠。
+// mergeArrivals 按入边 ID（Slot）升序合并各分支到达时的节点输出：分叉前的节点在各分支相同，分叉后的节点互不重叠。
 func mergeArrivals(arrivals map[string]engine.Outputs) engine.Outputs {
 	out := engine.Outputs{}
 	for _, slot := range slices.Sorted(maps.Keys(arrivals)) {

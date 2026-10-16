@@ -37,23 +37,6 @@ type HTTPOutput struct {
 	OK     bool   `json:"OK"`
 }
 
-// Validate 在定义期检查 URL、Body、Headers 中的模板插值能否编译。
-// URL 可为绑定引用；字面量为空时由 InputSchema.required 保证键存在。
-func (c HTTPInput) Validate() error {
-	if err := graph.ValidateTemplate(c.URL); err != nil {
-		return err
-	}
-	if err := graph.ValidateTemplate(c.Body); err != nil {
-		return err
-	}
-	for _, value := range c.Headers {
-		if err := graph.ValidateTemplate(value); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (c HTTPInput) Expressions() []node.Expression {
 	exprs := []node.Expression{
 		{Path: "URL", Text: c.URL, Template: true},
@@ -81,6 +64,9 @@ func (HTTPNode) Spec() node.NodeSpec {
 	}, HTTPInput{Method: "GET", TimeoutSec: 30}))
 }
 
+// maxHTTPResponseBytes 限制 HTTP 节点单次读取响应体的最大字节数（16 MiB），防止外部服务返回超大响应撑爆内存或数据库。
+const maxHTTPResponseBytes = 16 << 20
+
 // Execute 渲染 URL / Body / Headers 模板后发出请求，把响应体、状态码与是否 2xx 写入输出。
 // Method 为空时用 GET；TimeoutSec 不大于 0 时用 30 秒。请求头带上幂等键 RunID:Seq，重试与租约重领时不变，下游可据此去重。
 func (HTTPNode) Execute(ctx context.Context, in node.NodeInput) (node.NodeOutput, error) {
@@ -88,7 +74,6 @@ func (HTTPNode) Execute(ctx context.Context, in node.NodeInput) (node.NodeOutput
 	if err != nil {
 		return node.NodeOutput{}, err
 	}
-	vars := maps.Clone(in.Vars)
 	method := strings.ToUpper(strings.TrimSpace(input.Method))
 	if method == "" {
 		method = http.MethodGet
@@ -99,15 +84,15 @@ func (HTTPNode) Execute(ctx context.Context, in node.NodeInput) (node.NodeOutput
 	}
 	var body io.Reader
 	if method != http.MethodGet && method != http.MethodHead {
-		body = strings.NewReader(graph.RenderTemplate(input.Body, vars))
+		body = strings.NewReader(graph.RenderTemplate(input.Body, in.Vars))
 	}
-	address := strings.TrimSpace(graph.RenderTemplate(input.URL, vars))
+	address := strings.TrimSpace(graph.RenderTemplate(input.URL, in.Vars))
 	req, err := http.NewRequestWithContext(ctx, method, address, body)
 	if err != nil {
 		return node.NodeOutput{}, fmt.Errorf("http: invalid request: %w", err)
 	}
 	for key, value := range input.Headers {
-		req.Header.Set(key, graph.RenderTemplate(value, vars))
+		req.Header.Set(key, graph.RenderTemplate(value, in.Vars))
 	}
 	if key := in.Key.IdempotencyKey(); key != "" {
 		req.Header.Set("Idempotency-Key", key)
@@ -117,13 +102,16 @@ func (HTTPNode) Execute(ctx context.Context, in node.NodeInput) (node.NodeOutput
 		return node.NodeOutput{}, fmt.Errorf("http: request failed: %w", err)
 	}
 	defer res.Body.Close()
-	data, err := io.ReadAll(res.Body)
+	data, err := io.ReadAll(io.LimitReader(res.Body, maxHTTPResponseBytes+1))
 	if err != nil {
 		return node.NodeOutput{}, fmt.Errorf("http: read response: %w", err)
 	}
-	return node.Continue(node.OutputMap(HTTPOutput{
-		Body:   string(data),
-		Status: int64(res.StatusCode),
-		OK:     res.StatusCode >= 200 && res.StatusCode < 300,
-	}), ""), nil
+	if len(data) > maxHTTPResponseBytes {
+		return node.NodeOutput{}, fmt.Errorf("http: response body exceeds %d bytes", maxHTTPResponseBytes)
+	}
+	return node.Continue(map[string]any{
+		"Body":   string(data),
+		"Status": int64(res.StatusCode),
+		"OK":     res.StatusCode >= 200 && res.StatusCode < 300,
+	}, ""), nil
 }

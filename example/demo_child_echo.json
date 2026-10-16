@@ -56,7 +56,9 @@
     "InputSchema": {
       "type": "object",
       "properties": {
-        "name": {}
+        "name": {
+          "type": "string"
+        }
       },
       "additionalProperties": false,
       "required": [

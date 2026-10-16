@@ -31,7 +31,7 @@ func (st *state) onStarted() error {
 	t.Status, t.StartedAt = graph.RUNNING, st.now
 	st.touchTask()
 	st.insert(root)
-	return st.enter(root, st.c.Entry, "")
+	return st.enter(root, st.c.entryNode(), "")
 }
 
 // onActivityDone 应用活动节点的执行结果。Run 不在 RUNNING 或已不在这次执行上（RunID/Seq/Attempt 不一致）时忽略；
@@ -41,10 +41,10 @@ func (st *state) onActivityDone(ev ActivityDone) error {
 	if !ev.Current(r) || r.Status != graph.RUNNING {
 		return nil
 	}
-	n := st.c.Nodes[r.NodeID]
+	n := st.c.node(r.NodeID)
 	out, err := ev.Output, ev.Err
 	if err == nil {
-		// 活动节点返回非法形态按节点失败处理（可重试、可走错误出口），不视为内核缺陷：
+		// 活动节点返回非法形态按节点失败处理（可重试），不视为内核缺陷：
 		// 业务节点在内核之外执行，其实现问题不应使整个引擎判定为内核故障。
 		out, err = st.checkOutput(n, out)
 	}
@@ -75,7 +75,7 @@ func (st *state) onChildDone(ev ChildDone) error {
 	st.unawait(r.RunID, ev.Slot)
 	r.WaitReason = ""
 	st.save(r)
-	n := st.c.Nodes[r.NodeID]
+	n := st.c.node(r.NodeID)
 	cev := node.Event{Kind: node.EventChildDone, Slot: ev.Slot}
 	if ev.Status != graph.SUCCEEDED {
 		cev.Error = ev.Error
@@ -89,10 +89,7 @@ func (st *state) onChildDone(ev ChildDone) error {
 		}
 	}
 	// 与首次进入时使用同一组输入（含调试注入的值），Controller 每轮看到的 Vars 一致。
-	vars, _ := st.c.project(n.ID, st.task.Input, r.Outputs)
-	if inj := st.task.Policy.Debug.InjectFor(n.ID); inj != nil {
-		maps.Copy(vars, inj.Vars)
-	}
+	vars, _ := projectNodeInputs(st.c.reg, n, st.task.Input, r.Outputs, st.task.Policy.Debug.InjectFor(n.ID))
 	return st.invoke(r, n, vars, cev)
 }
 
@@ -110,35 +107,18 @@ func (st *state) enter(r *engine.Run, to, via string) error {
 	return st.reach(r)
 }
 
-// stale 报告 Run 的父 Run 是否已不在等待它（父 Run 已汇合继续或已结束）。
-// 不变式：有存活子 Run 的父 Run 一定处于 WAITING(join)；违反即说明本 Run 是 any 汇合的落选者。
-func (st *state) stale(r *engine.Run) (*engine.Run, bool) {
-	if r.ParentRunID == "" {
-		return nil, false
-	}
-	p := st.runs[r.ParentRunID]
-	if p == nil {
-		return nil, true
-	}
-	return p, p.Status != graph.WAITING || p.WaitReason != engine.WaitJoin
-}
-
-// skip 把过期的 Run 置为 SKIPPED。
+// skip 把落选或被忽略的分支 Run 置为 SKIPPED，并取消其子 Task。
 func (st *state) skip(r *engine.Run) {
 	st.dropChildren(r)
+	clearJoin(r)
 	r.Status = graph.SKIPPED
 	st.save(r)
 }
 
-// reach 处理 Run 进入当前节点：先判断是否到达父 Run 的汇合点，否则执行节点。
+// reach 处理 Run 进入当前节点：多入边节点先走汇合门控（arrive），单入边或入口节点直接执行（visit）。
 func (st *state) reach(r *engine.Run) error {
-	p, stale := st.stale(r)
-	if stale {
-		st.skip(r)
-		return nil
-	}
-	if p != nil && p.JoinNodeID == r.NodeID {
-		return st.arrive(p, r)
+	if inEdges := st.c.inEdges(r.NodeID); len(inEdges) > 1 {
+		return st.arrive(r, inEdges)
 	}
 	return st.visit(r)
 }
@@ -151,16 +131,19 @@ func (st *state) gated(nodeID string) bool {
 	if t.Policy.Debug != nil && t.Policy.Debug.HasBreakpoint(nodeID) {
 		return true
 	}
-	ep := st.c.Endpoints[nodeID]
+	if !t.Paused && (t.Policy.Debug == nil || !t.Policy.Debug.Step) {
+		return false
+	}
+	ep, _ := st.c.reg.NodeEndpoints(st.c.node(nodeID))
 	if ep.IsEntry() || ep.IsTerminal() {
 		return false
 	}
-	return t.Paused || (t.Policy.Debug != nil && t.Policy.Debug.Step)
+	return true
 }
 
 // visit 执行 Run 当前所在节点：先过调试关口（断点、单步、暂停），通过后由 proceed 执行内联节点或激活活动节点。
 func (st *state) visit(r *engine.Run) error {
-	n := st.c.Nodes[r.NodeID]
+	n := st.c.node(r.NodeID)
 	if st.gated(n.ID) {
 		r.Status, r.WaitReason = graph.WAITING, engine.WaitDebug
 		st.save(r)
@@ -171,21 +154,19 @@ func (st *state) visit(r *engine.Run) error {
 
 // proceed 在通过调试关口（或 Resume 放行）后执行节点：内联节点在本次 Apply 内同步执行，活动节点做前置检查后置为 PENDING。
 func (st *state) proceed(r *engine.Run, n graph.Node) error {
-	if st.c.Inline[n.ID] {
+	if st.c.reg.Inline(n.Kind) {
 		return st.runInline(r, n)
 	}
 	return st.activate(r, n)
 }
 
-// prepare 按投影计划取节点输入并合入调试注入。返回的 failure 非空表示节点应直接失败：
-// 调试注入要求失败，或输入来源缺失（不读到空值）。
+// prepare 按节点 Inputs 取节点输入并合入调试注入。返回的 failure 非空表示节点应直接失败：
+// 调试注入要求失败，或输入来源缺失且未被调试注入覆盖（不读到空值）。
 func (st *state) prepare(r *engine.Run, n graph.Node) (vars map[string]any, failure error) {
-	vars, missing := st.c.project(n.ID, st.task.Input, r.Outputs)
-	if inj := st.task.Policy.Debug.InjectFor(n.ID); inj != nil {
-		maps.Copy(vars, inj.Vars)
-		if inj.Failed {
-			return vars, errors.New(injectMessage(inj))
-		}
+	inj := st.task.Policy.Debug.InjectFor(n.ID)
+	vars, missing := projectNodeInputs(st.c.reg, n, st.task.Input, r.Outputs, inj)
+	if inj != nil && inj.Failed {
+		return vars, errors.New(injectMessage(inj))
 	}
 	return vars, missing
 }
@@ -241,81 +222,75 @@ func (st *state) call(r *engine.Run, n graph.Node, vars map[string]any, ev node.
 			panicked = p
 		}
 	}()
-	typ, ok := st.c.Registry.Lookup(n.Kind)
+	typ, ok := st.c.reg.Lookup(n.Kind)
 	if !ok {
 		return out, nil, fmt.Sprintf("node kind %q not registered", n.Kind)
 	}
-	params := st.c.resolveParams(n, vars, st.task.Policy.Debug.InjectFor(n.ID))
+	params := resolveNodeParams(st.c.reg, n, vars, st.task.Policy.Debug.InjectFor(n.ID))
+	// vars 已由 projectNodeInputs 隔离；节点按只读约定使用，需要写入局部变量时自行复制。
 	if ctrl, ok := typ.(node.Controller); ok {
 		out, err = ctrl.Control(context.Background(), node.ControlInput{
-			NodeID: n.ID, Vars: maps.Clone(vars), Params: params,
+			NodeID: n.ID, Vars: vars, Params: params,
 			Event: ev, State: append(json.RawMessage(nil), r.State...),
 		})
 		return out, err, nil
+	}
+	if ev.Kind == node.EventChildDone {
+		// 非 Controller 节点不处理子任务完成事件；若收到 EventChildDone 说明状态异常，按内核缺陷拦截。
+		// Only Controller nodes handle EventChildDone; reject non-Controller kinds defensively.
+		return out, nil, fmt.Sprintf("node kind %q is not a controller", n.Kind)
 	}
 	exec, ok := typ.(node.Executor)
 	if !ok {
 		return out, nil, fmt.Sprintf("node kind %q has no executor or controller", n.Kind)
 	}
 	out, err = exec.Execute(context.Background(), node.NodeInput{
-		NodeID: n.ID, Vars: maps.Clone(vars), Params: params,
+		NodeID: n.ID, Vars: vars, Params: params,
 		Key:    node.RunKey{TaskID: r.TaskID, RunID: r.RunID, Seq: r.Seq, Attempt: r.Attempt},
 		Lookup: lookup(st.task.Input, r.Outputs),
 	})
 	return out, err, nil
 }
 
-// checkOutput 把 Set 经一次严格 JSON 处理规整（整数为 int64），使 immediate 与经过数据库的 durable
-// 对同一值得到相同类型；再按编译期生成的输出规则校验形态。State 只允许 Controller 返回。
+// checkOutput 把 Set 与 Finish.Output 经一次严格 JSON 处理规整（整数为 int64），使 immediate 与经过数据库的 durable
+// 对同一值得到相同类型；再经 Registry.CheckOutput 校验形态、Controller 专属字段（State / EffectSpawn）、输出键与端点。
 func (st *state) checkOutput(n graph.Node, out node.NodeOutput) (node.NodeOutput, error) {
-	if len(out.State) > 0 {
-		if typ, _ := st.c.Registry.Lookup(n.Kind); !isController(typ) {
-			return out, fmt.Errorf("node %s: State is only allowed for Controller", n.ID)
-		}
-	}
 	set, err := Normalize(out.Set)
 	if err != nil {
 		return out, fmt.Errorf("node %s output: %w", n.ID, err)
 	}
 	out.Set = set
-	return out, st.c.outputs[n.ID].Check(out)
+	if out.Effect != nil && len(out.Effect.Output) > 0 {
+		effOut, err := Normalize(out.Effect.Output)
+		if err != nil {
+			return out, fmt.Errorf("node %s output: %w", n.ID, err)
+		}
+		eff := *out.Effect
+		eff.Output = effOut
+		out.Effect = &eff
+	}
+	return out, st.c.reg.CheckOutput(n, out)
 }
 
-func isController(t node.Node) bool {
-	_, ok := t.(node.Controller)
-	return ok
-}
-
-// applyOutput 按 NodeOutput 封闭形态推进（见 OutcomeKind）：
-// Effect 类由 applyEffect 处理；Wait 在有子任务时继续等待；Continue 写入输出后沿 Endpoint 继续。
-// Invalid 到此已在 checkOutput 中被拒绝，命中时报内核缺陷。
+// applyOutput 按 NodeOutput 推进：Effect 类由 applyEffect 处理；无输出且有子任务时继续等待；其余写入输出后沿 Endpoint 继续。
 func (st *state) applyOutput(r *engine.Run, n graph.Node, out node.NodeOutput) error {
 	if len(out.State) > 0 {
 		r.State = append(json.RawMessage(nil), out.State...)
 		st.save(r)
 	}
-	switch out.Kind() {
-	case node.OutcomeSpawn, node.OutcomeFinish, node.OutcomeFail:
+	if out.Effect != nil {
 		return st.applyEffect(r, n, out.Effect)
-	case node.OutcomeWait:
+	}
+	if !out.Leaves() {
 		if len(st.awaited(r.RunID)) > 0 {
-			// 本次访问还有未结束的子 Task（map 的其余轮次）：Run 继续等待，不离开节点。
 			st.park(r)
 			return nil
 		}
 		if len(out.State) > 0 {
 			return fmt.Errorf("kernel: node %s returned only State without running child tasks", n.ID)
 		}
-		// 空 Wait（无 State、无子任务）为直通：落到下方沿默认出口继续（start / parallel 即此形态）。
-	case node.OutcomeContinue:
-		// 见下：写入输出后沿 Endpoint 继续。
-	default:
-		return fmt.Errorf("kernel: inline node %s returned invalid output", n.ID)
 	}
-	// 记录本节点已成功执行并离开（无输出节点写入空 map {}），供下游投影与运行轨迹染色识别已访问节点。
-	// Record that this node has succeeded and been left (empty map {} for stateless nodes)
-	// so downstream projection and run-trace coloring can identify visited nodes.
-	setOutputs(r, n.ID, maps.Clone(out.Set))
+	st.setOutputs(r, n.ID, out.Set)
 	return st.next(r, n, out.Endpoint)
 }
 
@@ -324,10 +299,10 @@ func lookup(input map[string]any, outs engine.Outputs) func(graph.InputRef) (any
 	return func(ref graph.InputRef) (any, bool) {
 		if ref.From == graph.InputSource {
 			v, ok := input[ref.Field]
-			return v, ok
+			return engine.CloneValue(v), ok
 		}
 		v, ok := outs[ref.From][ref.Field]
-		return v, ok
+		return engine.CloneValue(v), ok
 	}
 }
 
@@ -355,12 +330,13 @@ func (st *state) applyEffect(r *engine.Run, n graph.Node, eff *node.Effect) erro
 	}
 }
 
-// 子任务派发见 spawn.go（applySpawn、embedded、spawn、compile、park、dropChildren）。
+// 子任务派发见 spawn.go（applySpawn、embedded、spawn、park、dropChildren）。
 // next 沿匹配 branch 的出边继续：一条直接进入，多条则 fork。
 func (st *state) next(r *engine.Run, n graph.Node, branch string) error {
-	outs := matchingOutEdges(st.c.Out[n.ID], branch)
+	outEdges := st.c.outEdges(n.ID)
+	outs := matchingOutEdges(outEdges, branch)
 	if len(outs) == 0 {
-		return st.nodeFailed(r, n, errNoMatchingOutgoing(n.ID, branch, st.c.Out[n.ID]))
+		return st.nodeFailed(r, n, errNoMatchingOutgoing(n.ID, branch, outEdges))
 	}
 	if len(outs) == 1 {
 		return st.enter(r, outs[0].ToNode(), outs[0].ID)
@@ -368,24 +344,13 @@ func (st *state) next(r *engine.Run, n graph.Node, branch string) error {
 	return st.fork(r, outs)
 }
 
-// nodeFailed 处理节点失败：有 Error 出端点的出边时把 {Error} 写为本节点输出后沿该边继续，否则 Run 失败。
+// nodeFailed 处理节点失败：当前 Run 标记为 FAILED，整个 Task 立即终止为 FAILED。
 func (st *state) nodeFailed(r *engine.Run, n graph.Node, err error) error {
-	if edge, ok := findErrorEdge(st.c.Out[n.ID]); ok {
-		setOutputs(r, n.ID, errorOutputs(err.Error()))
-		return st.enter(r, edge.ToNode(), edge.ID)
-	}
-	return st.failRun(r, fmt.Errorf("node %s: %w", n.ID, err))
-}
-
-// failRun 标记 Run 失败：fail_fast 时整个 Task 失败；continue 时该路径结束，其余路径继续。
-func (st *state) failRun(r *engine.Run, err error) error {
-	r.Status, r.Error = graph.FAILED, err.Error()
+	msg := fmt.Sprintf("node %s: %v", n.ID, err)
+	r.Status, r.Error = graph.FAILED, msg
 	st.dropChildren(r)
 	st.save(r)
-	if st.task.Policy.FailPolicy == engine.FailContinue {
-		return st.ended(r)
-	}
-	st.endTask(graph.FAILED, err.Error())
+	st.endTask(graph.FAILED, msg)
 	return nil
 }
 
@@ -401,6 +366,7 @@ func (st *state) endTask(status graph.StatusCode, msg string) {
 	st.touchTask()
 	for _, r := range st.list(engine.Live...) {
 		st.dropChildren(r)
+		clearJoin(r)
 		r.Status = graph.CANCELED
 		st.save(r)
 	}
@@ -419,40 +385,27 @@ func (st *state) taskEnded() {
 	}}
 }
 
-// ended 处理 Run 进入终态（到达 end、continue 策略下失败等）：根 Run 结束即 Task 结束；
-// 子 Run 结束时父 Run 的存活子 Run 数减 1，全部结束后父 Run 汇合或结束。
-func (st *state) ended(r *engine.Run) error {
-	if r.ParentRunID == "" {
+// ended 在一条分支完成（到达 end 或被跳过）时检查：当图中不再有未结束的 Run 时结束 Task。
+func (st *state) ended(_ *engine.Run) error {
+	if len(st.list(engine.Live...)) == 0 {
 		st.finishTask()
-		return nil
-	}
-	p := st.runs[r.ParentRunID]
-	if p == nil || p.Status != graph.WAITING || p.WaitReason != engine.WaitJoin {
-		return nil
-	}
-	p.LiveChildren--
-	st.save(p)
-	if p.LiveChildren <= 0 {
-		return st.settle(p)
 	}
 	return nil
 }
 
-// finishTask 在根 Run 结束时结束 Task：存在到达 end 的 Run 时为 SUCCEEDED，
-// 输出为这些 Run 的输出按 (FromEdgeID, RunID) 顺序浅合并；没有 Run 到达 end 且有失败的 Run 时为 FAILED。
+// finishTask 在全部可达分支执行完毕后汇总终态：收集所有真实完成 Finish 的终点 Run 输出（按 (FromEdgeID, RunID) 稳定浅合并），
+// 将 Task 置为 SUCCEEDED。
 func (st *state) finishTask() {
 	t := st.task
 	if graph.IsTerminal(t.Status) {
 		return
 	}
 	var ends []*engine.Run
-	failure := ""
-	for _, r := range st.list(graph.SUCCEEDED, graph.FAILED) {
-		switch {
-		case r.Status == graph.SUCCEEDED && st.c.Endpoints[r.NodeID].IsTerminal():
-			ends = append(ends, r)
-		case r.Status == graph.FAILED && failure == "":
-			failure = r.Error
+	for _, r := range st.list(graph.SUCCEEDED) {
+		if r.Output != nil {
+			if ep, err := st.c.reg.NodeEndpoints(st.c.node(r.NodeID)); err == nil && ep.IsTerminal() {
+				ends = append(ends, r)
+			}
 		}
 	}
 	slices.SortFunc(ends, func(x, y *engine.Run) int {
@@ -461,29 +414,32 @@ func (st *state) finishTask() {
 		}
 		return strings.Compare(x.RunID, y.RunID)
 	})
+	output := map[string]any{}
+	for _, r := range ends {
+		maps.Copy(output, r.Output)
+	}
 	now := st.now
 	t.FinishedAt = &now
-	if len(ends) == 0 && failure != "" {
-		t.Status, t.Error = graph.FAILED, failure
-	} else {
-		output := map[string]any{}
-		for _, r := range ends {
-			maps.Copy(output, r.Output)
-		}
-		t.Status, t.Output = graph.SUCCEEDED, output
-	}
+	t.Status, t.Output = graph.SUCCEEDED, output
 	st.touchTask()
 	st.taskEnded()
 }
 
 // fork / 汇合推进见 join.go（fork、branch、arrive、skipDescendants、settle、clearJoin）。
-// setOutputs 把节点本次的输出整体写入 Run.Outputs[nodeID]（覆盖上一次）。
-func setOutputs(r *engine.Run, nodeID string, out map[string]any) {
+// setOutputs 把节点本次的输出整体写入 Run.Outputs[nodeID]（覆盖上一次）；
+// 首次修改入参带入的 Run.Outputs 时先浅拷贝顶层 map，保证不修改 Apply 的入参。
+func (st *state) setOutputs(r *engine.Run, nodeID string, out map[string]any) {
 	if out == nil {
 		out = map[string]any{}
 	}
 	if r.Outputs == nil {
-		r.Outputs = engine.Outputs{}
+		r.Outputs = engine.Outputs{nodeID: out}
+		st.ownOutputs[r.RunID] = true
+		return
+	}
+	if !st.ownOutputs[r.RunID] {
+		r.Outputs = maps.Clone(r.Outputs)
+		st.ownOutputs[r.RunID] = true
 	}
 	r.Outputs[nodeID] = out
 }

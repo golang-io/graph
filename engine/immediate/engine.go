@@ -2,7 +2,7 @@
 //
 // 本引擎的边界：
 //   - 全部状态在内存中：每个 Task 一个处理循环，逐个把事件交给 engine/kernel 的 Apply；运行期间不读写数据库，不使用租约；
-//   - 活动节点在独立 goroutine 中执行；全局名额（Options.MaxActivities）限制总并发，Policy.MaxParallel 限制单个 Task；
+//   - 活动节点在独立 goroutine 中执行；Policy.MaxParallel 限制单个 Task 的并发度；
 //   - Task 结束时在一个事务内写入 Task 与全部 Run；没有配置数据库时跳过写入；
 //   - 进程退出后执行中的 Task 丢失，数据库中没有它的记录；需要续跑应使用 durable。
 //
@@ -10,7 +10,6 @@
 package immediate
 
 import (
-	"container/list"
 	"context"
 	"fmt"
 	"slices"
@@ -25,30 +24,24 @@ import (
 
 // Options 是 immediate 引擎的配置。
 type Options struct {
-	// MaxActivities 是本引擎同时执行的活动节点总数上限，默认 256。名额不足时 Run 保持 PENDING。
-	MaxActivities int
 	// Retain 是已结束的 Task 在内存中的保留时间，默认 1 分钟（使用 DefaultOptions）；期间 Snapshot / Watch / Signal 读内存，
 	// 之后从数据库读取（没有数据库时返回 ErrNotFound）。
 	// 小于等于 0 时结束即释放，不走 time.AfterFunc 延迟注销。
 	Retain time.Duration
 	// MaxRetainedTasks 是已结束 Task 在内存中保留的最大数量上限，默认 10000。
-	// 当保留任务数超过该阈值时，按 LRU 自动驱逐最老已完成的任务。
+	// 当保留任务数超过该阈值时，按 FIFO 自动驱逐最老已完成的任务。
 	MaxRetainedTasks int
 }
 
 // DefaultOptions 返回 immediate 引擎的默认配置。
 func DefaultOptions() Options {
 	return Options{
-		MaxActivities:    256,
 		Retain:           time.Minute,
 		MaxRetainedTasks: 10000,
 	}
 }
 
 func (o Options) normalize() Options {
-	if o.MaxActivities <= 0 {
-		o.MaxActivities = 256
-	}
 	if o.MaxRetainedTasks <= 0 {
 		o.MaxRetainedTasks = 10000
 	}
@@ -66,18 +59,15 @@ const closeReason = "engine closed"
 
 // Engine 是 immediate 引擎。
 type Engine struct {
-	cfg   engine.EngineConfig // cfg.DB 为 nil 表示不写库：结果只能在内存保留期内通过 Snapshot / Watch 获取
-	opt   Options
-	cache *kernel.Cache
-	slots *slots
-	wg    sync.WaitGroup // 处理循环与活动节点 goroutine
+	cfg engine.EngineConfig // cfg.DB 为 nil 表示不写库：结果只能在内存保留期内通过 Snapshot / Watch 获取
+	opt Options
+	wg  sync.WaitGroup // 处理循环与活动节点 goroutine
 
-	mu            sync.Mutex
-	live          map[string]*task         // 执行中与保留期内的 Task（含子 Task）
-	retainedList  *list.List               // LRU 链表：Front 是最新访问/完成的，Back 是最老完成的
-	retainedTasks map[string]*list.Element // TaskID -> *list.Element (Value 为 *retainedEntry)
-	closed        bool
-	closeDone     chan struct{}
+	mu        sync.Mutex
+	live      map[string]*task // 执行中与保留期内的 Task（含子 Task）
+	retained  []retainedEntry  // 按完成顺序排列的保留队列（FIFO）
+	closed    bool
+	closeDone chan struct{}
 }
 
 var (
@@ -109,11 +99,9 @@ func With(opt Options) engine.Builder {
 func New(cfg engine.EngineConfig, opt Options) *Engine {
 	opt = opt.normalize()
 	return &Engine{
-		cfg: cfg, opt: opt, cache: kernel.NewCache(cfg.Nodes), slots: newSlots(opt.MaxActivities),
-		live:          map[string]*task{},
-		retainedList:  list.New(),
-		retainedTasks: map[string]*list.Element{},
-		closeDone:     make(chan struct{}),
+		cfg: cfg, opt: opt,
+		live:      map[string]*task{},
+		closeDone: make(chan struct{}),
 	}
 }
 
@@ -127,34 +115,21 @@ func Execute(ctx context.Context, cfg engine.EngineConfig, req engine.StartReque
 	if err != nil {
 		return engine.TaskSnapshot{}, err
 	}
-	wctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	ch, err := e.Watch(wctx, rec.TaskID)
-	if err != nil {
-		return engine.TaskSnapshot{}, err
+	tk := e.lookup(rec.TaskID)
+	if tk == nil {
+		return e.Snapshot(ctx, rec.TaskID)
 	}
-	var last engine.TaskSnapshot
-	for s := range ch {
-		last = s
-		if graph.IsTerminal(s.Task.Status) || debugIdle(s) {
-			return s, nil
+	for {
+		done, changed := tk.idle()
+		if done {
+			return tk.finalSnapshot(), nil
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return tk.finalSnapshot(), ctx.Err()
 		}
 	}
-	return last, ctx.Err()
-}
-
-// debugIdle 报告 Task 是否停在调试等待上：没有 PENDING / RUNNING 的 Run，且至少一个 Run 处于 WAITING(debug)。
-func debugIdle(s engine.TaskSnapshot) bool {
-	parked := false
-	for _, r := range s.Runs {
-		switch r.Status {
-		case graph.PENDING, graph.RUNNING:
-			return false
-		case graph.WAITING:
-			parked = parked || r.WaitReason == engine.WaitDebug
-		}
-	}
-	return parked
 }
 
 // Kind 返回引擎标识。
@@ -162,20 +137,19 @@ func (e *Engine) Kind() string { return engine.KindImmediate }
 
 // env 返回一次 Apply 的环境。
 func (e *Engine) env() kernel.Env {
-	return kernel.Env{Now: e.cfg.Now(), Compile: e.cache.Compile}
+	return kernel.Env{Now: e.cfg.Now()}
 }
 
-// Start 编译图、构造 Task，启动它的处理循环并应用 Started（执行到第一批活动节点或等待点）后返回回执。
+// Start 校验图、构造 Task，启动它的处理循环并应用 Started（执行到第一批活动节点或等待点）后返回回执。
 func (e *Engine) Start(ctx context.Context, req engine.StartRequest) (engine.Receipt, error) {
-	c, err := e.cache.Compile(req.PinnedGraph())
+	if err := ctx.Err(); err != nil {
+		return engine.Receipt{}, err
+	}
+	t, err := kernel.NewTask(engine.KindImmediate, req, e.cfg.Nodes, e.env())
 	if err != nil {
 		return engine.Receipt{}, err
 	}
-	t, err := kernel.NewTask(engine.KindImmediate, req, c, e.env())
-	if err != nil {
-		return engine.Receipt{}, err
-	}
-	tk := e.newTask(t, c)
+	tk := e.newTask(t)
 	if err := e.register(tk); err != nil {
 		return engine.Receipt{}, err
 	}
@@ -198,7 +172,7 @@ func (e *Engine) register(tk *task) error {
 // spawn 执行 StartChild：子 Task 使用父 Task 的引擎，拥有自己的处理循环。
 // 无法启动（引擎正在关闭）时把失败结果作为 ChildDone 交回父 Run，由父 Task 按节点失败处理。
 func (e *Engine) spawn(parent *task, sc kernel.StartChild) {
-	child := e.newTask(sc.Task, sc.Compiled)
+	child := e.newTask(sc.Task)
 	if err := e.register(child); err != nil {
 		parent.box.put(message{ev: kernel.ChildDone{
 			RunID: sc.Task.ParentRunID, Slot: sc.Task.Slot, ChildTaskID: sc.Task.TaskID,
@@ -217,20 +191,14 @@ func (e *Engine) post(taskID string, ev kernel.Event) {
 	}
 }
 
-// lookup 返回内存中的 Task；不在内存中时返回 nil。若该 Task 处于保留列表中，刷新其 LRU 顺序。
+// lookup 返回内存中的 Task；不在内存中时返回 nil。
 func (e *Engine) lookup(taskID string) *task {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	tk := e.live[taskID]
-	if tk != nil {
-		if elem, ok := e.retainedTasks[taskID]; ok {
-			e.retainedList.MoveToFront(elem)
-		}
-	}
-	return tk
+	return e.live[taskID]
 }
 
-// retire 安排已结束的 Task 在保留期后移出内存，并在保留数超过 MaxRetainedTasks 时按 LRU 淘汰最老完成的任务。
+// retire 安排已结束的 Task 在保留期后移出内存，并在保留数超过 MaxRetainedTasks 时按 FIFO 淘汰最老完成的任务。
 // 当 Retain <= 0 时立即释放，不走 time.AfterFunc 延迟注销。
 func (e *Engine) retire(tk *task) {
 	e.mu.Lock()
@@ -246,47 +214,40 @@ func (e *Engine) retire(tk *task) {
 	}
 
 	e.evictRetained(tk.id)
-
-	for e.retainedList.Len() >= e.opt.MaxRetainedTasks {
-		back := e.retainedList.Back()
-		if back == nil {
-			break
-		}
-		entry := back.Value.(*retainedEntry)
-		e.evictRetained(entry.tk.id)
+	for len(e.retained) >= e.opt.MaxRetainedTasks {
+		e.evictRetained(e.retained[0].tk.id)
 	}
 
-	entry := &retainedEntry{tk: tk}
-	entry.timer = time.AfterFunc(e.opt.Retain, func() {
+	timer := time.AfterFunc(e.opt.Retain, func() {
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		e.evictRetained(tk.id)
 	})
-
-	elem := e.retainedList.PushFront(entry)
-	e.retainedTasks[tk.id] = elem
+	e.retained = append(e.retained, retainedEntry{tk: tk, timer: timer})
 }
 
-// evictRetained 从 LRU 链表与 live 中移出指定的已完成 Task（调用方必须持有 e.mu）。
+// evictRetained 从保留队列与 live 中移出指定的已完成 Task（调用方必须持有 e.mu）。
 func (e *Engine) evictRetained(id string) {
-	elem, ok := e.retainedTasks[id]
-	if !ok {
-		return
-	}
-	delete(e.retainedTasks, id)
-	e.retainedList.Remove(elem)
-	entry := elem.Value.(*retainedEntry)
-	if entry.timer != nil {
-		entry.timer.Stop()
-	}
-	if e.live[id] == entry.tk {
-		delete(e.live, id)
+	for i, entry := range e.retained {
+		if entry.tk.id == id {
+			if entry.timer != nil {
+				entry.timer.Stop()
+			}
+			if e.live[id] == entry.tk {
+				delete(e.live, id)
+			}
+			e.retained = slices.Delete(e.retained, i, i+1)
+			return
+		}
 	}
 }
 
 // Signal 投递取消、暂停或恢复。Task 已结束时返回当前状态的回执，不报错；
 // 控制事件不满足前提（已暂停、没有可放行的 Run 等）时返回 ErrConflict / ErrInvalid，Task 照常执行。
 func (e *Engine) Signal(ctx context.Context, taskID string, sig engine.Signal) (engine.Receipt, error) {
+	if err := ctx.Err(); err != nil {
+		return engine.Receipt{}, err
+	}
 	ev, err := kernel.SignalEvent(sig)
 	if err != nil {
 		return engine.Receipt{}, err
@@ -331,16 +292,12 @@ func (e *Engine) Watch(ctx context.Context, taskID string) (<-chan engine.TaskSn
 	out := make(chan engine.TaskSnapshot)
 	go func() {
 		defer close(out)
-		last := ""
 		for {
 			snap, changed := tk.view()
-			if fp := engine.Fingerprint(snap); fp != last {
-				last = fp
-				select {
-				case out <- snap:
-				case <-ctx.Done():
-					return
-				}
+			select {
+			case out <- snap:
+			case <-ctx.Done():
+				return
 			}
 			if graph.IsTerminal(snap.Task.Status) {
 				return
@@ -453,14 +410,12 @@ func (e *Engine) Close(ctx context.Context) error {
 			e.wg.Wait()
 			e.mu.Lock()
 			clear(e.live)
-			for _, elem := range e.retainedTasks {
-				entry := elem.Value.(*retainedEntry)
+			for _, entry := range e.retained {
 				if entry.timer != nil {
 					entry.timer.Stop()
 				}
 			}
-			clear(e.retainedTasks)
-			e.retainedList.Init()
+			e.retained = nil
 			e.mu.Unlock()
 			close(e.closeDone)
 		}()

@@ -32,7 +32,7 @@ curl -s http://127.0.0.1:8080/api/graphs
       "GraphID": "demo_code",
       "Version": 1,
       "Name": "Demo · Code 表达式",
-      "Graph": {"GraphID": "demo_code", "GraphVersion": 1, "InputSchema": {"type": "object", "required": ["a", "b", "name"], "properties": {"a": {}, "b": {}, "name": {}}, "additionalProperties": false}, "Nodes": [{"ID": "start", "Kind": "__INNER__.start", "Name": "开始"}, "…"], "Edges": ["…"]},
+      "Graph": {"GraphID": "demo_code", "GraphVersion": 1, "InputSchema": {"type": "object", "required": ["a", "b", "name"], "properties": {"a": {"type": "number"}, "b": {"type": "number"}, "name": {"type": "string"}}, "additionalProperties": false}, "Nodes": [{"ID": "start", "Kind": "__INNER__.start", "Name": "开始"}, "…"], "Edges": ["…"]},
       "UI": {"Positions": {"start": {"X": 40, "Y": 80}, "calc": {"X": 280, "Y": 80}, "finish": {"X": 520, "Y": 80}}, "EndpointSides": {"start": {"Out": "right"}, "calc": {"In": "left", "Out": "right"}, "finish": {"In": "left"}}},
       "CreatedAt": "2026-10-05T18:16:22.651955Z",
       "UpdatedAt": "2026-10-05T18:16:22.651955Z"

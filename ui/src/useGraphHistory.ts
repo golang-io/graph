@@ -13,7 +13,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { GraphNodeJSON, GraphUI } from './types'
 
 const DEFAULT_LIMIT = 50
-const STORAGE_PREFIX = 'graph-ui.history.v1:'
+// v2：运行输入 Schema 强制带 type 后作废旧历史，避免 localStorage 里无 type / 错 type 的快照盖住服务端图。
+const STORAGE_PREFIX = 'graph-ui.history.v2:'
 const COALESCE_WINDOW_MS = 800
 
 /** 单条流程图编辑历史记录。 */
@@ -82,10 +83,15 @@ function nodeTitle(n: GraphNodeJSON): string {
 export function sameGraphSnapshot(a?: GraphUI | null, b?: GraphUI | null): boolean {
   if (a === b) return true
   if (!a || !b) return false
-  return (
-    JSON.stringify(a.Graph) === JSON.stringify(b.Graph) &&
-    JSON.stringify(a.UI ?? {}) === JSON.stringify(b.UI ?? {})
-  )
+  const ag = a.Graph, bg = b.Graph
+  const sameGraph =
+    ag === bg ||
+    (ag?.Nodes === bg?.Nodes &&
+      ag?.Edges === bg?.Edges &&
+      (ag?.InputSchema === bg?.InputSchema || JSON.stringify(ag?.InputSchema) === JSON.stringify(bg?.InputSchema))) ||
+    JSON.stringify(ag) === JSON.stringify(bg)
+  if (!sameGraph) return false
+  return a.UI === b.UI || JSON.stringify(a.UI ?? {}) === JSON.stringify(b.UI ?? {})
 }
 
 /** 构造一条标准化的历史记录项。 */
@@ -113,59 +119,74 @@ export function createHistoryEntry(
 export function describeGraphDiff(before: GraphUI, after: GraphUI): string {
   const bNodes = before.Graph?.Nodes ?? []
   const aNodes = after.Graph?.Nodes ?? []
-  const bNodeMap = new Map(bNodes.map((n) => [n.ID, n]))
-  const aNodeMap = new Map(aNodes.map((n) => [n.ID, n]))
-
-  // 1. 顶层节点增删
-  const addedNodes = aNodes.filter((n) => !bNodeMap.has(n.ID))
-  const removedNodes = bNodes.filter((n) => !aNodeMap.has(n.ID))
-  if (addedNodes.length === 1 && removedNodes.length === 0) {
-    return `添加节点 · ${nodeTitle(addedNodes[0]!)}`
-  }
-  if (addedNodes.length > 1 && removedNodes.length === 0) {
-    return `添加 ${addedNodes.length} 个节点`
-  }
-  if (removedNodes.length === 1 && addedNodes.length === 0) {
-    return `删除节点 · ${nodeTitle(removedNodes[0]!)}`
-  }
-  if (removedNodes.length > 1 && addedNodes.length === 0) {
-    return `删除 ${removedNodes.length} 个节点`
-  }
-
-  // 2. 顶层连线增删
+  const sameNodesRef = before.Graph === after.Graph || bNodes === aNodes
   const bEdges = before.Graph?.Edges ?? []
   const aEdges = after.Graph?.Edges ?? []
-  const bEdgeMap = new Map(bEdges.map((e) => [e.ID, e]))
-  const aEdgeMap = new Map(aEdges.map((e) => [e.ID, e]))
-  const addedEdges = aEdges.filter((e) => !bEdgeMap.has(e.ID))
-  const removedEdges = bEdges.filter((e) => !aEdgeMap.has(e.ID))
-  if (addedEdges.length === 1 && removedEdges.length === 0) {
-    return `连接连线 · ${addedEdges[0]!.From} → ${addedEdges[0]!.To}`
+  const sameEdgesRef = before.Graph === after.Graph || bEdges === aEdges
+
+  let bNodeMap: Map<string, GraphNodeJSON> | undefined
+  let aNodeMap: Map<string, GraphNodeJSON> | undefined
+  const getANode = (id: string) => {
+    aNodeMap ??= new Map(aNodes.map((n) => [n.ID, n]))
+    return aNodeMap.get(id)
   }
-  if (addedEdges.length > 1 && removedEdges.length === 0) {
-    return `添加 ${addedEdges.length} 条连线`
+
+  // 1. 顶层节点增删（Nodes 引用相同时直接跳过）
+  if (!sameNodesRef) {
+    bNodeMap = new Map(bNodes.map((n) => [n.ID, n]))
+    aNodeMap = new Map(aNodes.map((n) => [n.ID, n]))
+    const addedNodes = aNodes.filter((n) => !bNodeMap!.has(n.ID))
+    const removedNodes = bNodes.filter((n) => !aNodeMap!.has(n.ID))
+    if (addedNodes.length === 1 && removedNodes.length === 0) {
+      return `添加节点 · ${nodeTitle(addedNodes[0]!)}`
+    }
+    if (addedNodes.length > 1 && removedNodes.length === 0) {
+      return `添加 ${addedNodes.length} 个节点`
+    }
+    if (removedNodes.length === 1 && addedNodes.length === 0) {
+      return `删除节点 · ${nodeTitle(removedNodes[0]!)}`
+    }
+    if (removedNodes.length > 1 && addedNodes.length === 0) {
+      return `删除 ${removedNodes.length} 个节点`
+    }
   }
-  if (removedEdges.length === 1 && addedEdges.length === 0) {
-    return `删除连线 · ${removedEdges[0]!.From} → ${removedEdges[0]!.To}`
-  }
-  if (removedEdges.length > 1 && addedEdges.length === 0) {
-    return `删除 ${removedEdges.length} 条连线`
+
+  // 2. 顶层连线增删（Edges 引用相同时直接跳过）
+  if (!sameEdgesRef) {
+    const bEdgeMap = new Map(bEdges.map((e) => [e.ID, e]))
+    const aEdgeMap = new Map(aEdges.map((e) => [e.ID, e]))
+    const addedEdges = aEdges.filter((e) => !bEdgeMap.has(e.ID))
+    const removedEdges = bEdges.filter((e) => !aEdgeMap.has(e.ID))
+    if (addedEdges.length === 1 && removedEdges.length === 0) {
+      return `连接连线 · ${addedEdges[0]!.From} → ${addedEdges[0]!.To}`
+    }
+    if (addedEdges.length > 1 && removedEdges.length === 0) {
+      return `添加 ${addedEdges.length} 条连线`
+    }
+    if (removedEdges.length === 1 && addedEdges.length === 0) {
+      return `删除连线 · ${removedEdges[0]!.From} → ${removedEdges[0]!.To}`
+    }
+    if (removedEdges.length > 1 && addedEdges.length === 0) {
+      return `删除 ${removedEdges.length} 条连线`
+    }
   }
 
   // 3. 便签注释框（StickyNotes）增删改
   const bNotes = before.UI?.StickyNotes ?? []
   const aNotes = after.UI?.StickyNotes ?? []
-  if (aNotes.length > bNotes.length) {
-    const added = aNotes.find((n) => !bNotes.some((b) => b.ID === n.ID))
-    return `添加便签 · ${added?.Title || added?.ID || '便签'}`
-  }
-  if (aNotes.length < bNotes.length) {
-    const removed = bNotes.find((n) => !aNotes.some((a) => a.ID === n.ID))
-    return `删除便签 · ${removed?.Title || removed?.ID || '便签'}`
-  }
-  for (let i = 0; i < aNotes.length; i++) {
-    if (JSON.stringify(aNotes[i]) !== JSON.stringify(bNotes[i])) {
-      return `编辑便签 · ${aNotes[i]!.Title || aNotes[i]!.ID}`
+  if (bNotes !== aNotes) {
+    if (aNotes.length > bNotes.length) {
+      const added = aNotes.find((n) => !bNotes.some((b) => b.ID === n.ID))
+      return `添加便签 · ${added?.Title || added?.ID || '便签'}`
+    }
+    if (aNotes.length < bNotes.length) {
+      const removed = bNotes.find((n) => !aNotes.some((a) => a.ID === n.ID))
+      return `删除便签 · ${removed?.Title || removed?.ID || '便签'}`
+    }
+    for (let i = 0; i < aNotes.length; i++) {
+      if (aNotes[i] !== bNotes[i] && JSON.stringify(aNotes[i]) !== JSON.stringify(bNotes[i])) {
+        return `编辑便签 · ${aNotes[i]!.Title || aNotes[i]!.ID}`
+      }
     }
   }
 
@@ -177,61 +198,75 @@ export function describeGraphDiff(before: GraphUI, after: GraphUI): string {
     const bCol = Boolean(bSubs[k]?.Collapsed)
     const aCol = Boolean(aSubs[k]?.Collapsed)
     if (bCol !== aCol) {
-      const n = aNodeMap.get(k)
+      const n = getANode(k)
       return `${aCol ? '收起循环体' : '展开循环体'} · ${n ? nodeTitle(n) : k}`
     }
   }
 
-  // 5. 节点名称或输入参数配置修改（含循环体内部增删改）
-  for (const n of aNodes) {
-    const prev = bNodeMap.get(n.ID)
-    if (!prev) continue
-    if ((prev.Name ?? '') !== (n.Name ?? '')) {
-      return `重命名节点 · ${nodeTitle(n)}`
-    }
-    if (JSON.stringify(prev.Inputs ?? {}) !== JSON.stringify(n.Inputs ?? {})) {
-      if (JSON.stringify(prev.Inputs?.Body ?? null) !== JSON.stringify(n.Inputs?.Body ?? null)) {
-        return `编辑循环体 · ${nodeTitle(n)}`
+  // 5. 节点名称或输入参数配置修改（含循环体内部增删改；Nodes 引用相同时跳过）
+  if (!sameNodesRef) {
+    bNodeMap ??= new Map(bNodes.map((n) => [n.ID, n]))
+    for (const n of aNodes) {
+      const prev = bNodeMap.get(n.ID)
+      if (!prev || prev === n) continue
+      if ((prev.Name ?? '') !== (n.Name ?? '')) {
+        return `重命名节点 · ${nodeTitle(n)}`
       }
-      return `修改节点配置 · ${nodeTitle(n)}`
+      if (prev.Inputs !== n.Inputs && JSON.stringify(prev.Inputs ?? {}) !== JSON.stringify(n.Inputs ?? {})) {
+        if (JSON.stringify(prev.Inputs?.Body ?? null) !== JSON.stringify(n.Inputs?.Body ?? null)) {
+          return `编辑循环体 · ${nodeTitle(n)}`
+        }
+        return `修改节点配置 · ${nodeTitle(n)}`
+      }
     }
   }
 
   // 6. 运行输入参数 Schema 修改
-  if (JSON.stringify(before.Graph?.InputSchema ?? null) !== JSON.stringify(after.Graph?.InputSchema ?? null)) {
+  if (
+    before.Graph !== after.Graph &&
+    before.Graph?.InputSchema !== after.Graph?.InputSchema &&
+    JSON.stringify(before.Graph?.InputSchema ?? null) !== JSON.stringify(after.Graph?.InputSchema ?? null)
+  ) {
     return '修改运行参数定义'
   }
 
   // 7. 节点端点方位旋转 / 调整
   const bSides = before.UI?.EndpointSides ?? {}
   const aSides = after.UI?.EndpointSides ?? {}
-  for (const n of aNodes) {
-    if (JSON.stringify(bSides[n.ID] ?? {}) !== JSON.stringify(aSides[n.ID] ?? {})) {
-      return `旋转端点方位 · ${nodeTitle(n)}`
+  if (bSides !== aSides) {
+    for (const n of aNodes) {
+      if (bSides[n.ID] !== aSides[n.ID] && JSON.stringify(bSides[n.ID] ?? {}) !== JSON.stringify(aSides[n.ID] ?? {})) {
+        return `旋转端点方位 · ${nodeTitle(n)}`
+      }
     }
   }
 
   // 8. 节点位置移动（主图或循环体内）
   const bPos = before.UI?.Positions ?? {}
   const aPos = after.UI?.Positions ?? {}
-  const movedNodes: GraphNodeJSON[] = []
-  for (const n of aNodes) {
-    const bp = bPos[n.ID]
-    const ap = aPos[n.ID]
-    if ((bp?.X ?? 0) !== (ap?.X ?? 0) || (bp?.Y ?? 0) !== (ap?.Y ?? 0)) {
-      movedNodes.push(n)
+  if (bPos !== aPos) {
+    const movedNodes: GraphNodeJSON[] = []
+    for (const n of aNodes) {
+      const bp = bPos[n.ID]
+      const ap = aPos[n.ID]
+      if ((bp?.X ?? 0) !== (ap?.X ?? 0) || (bp?.Y ?? 0) !== (ap?.Y ?? 0)) {
+        movedNodes.push(n)
+      }
     }
-  }
-  if (movedNodes.length === 1) {
-    return `移动节点 · ${nodeTitle(movedNodes[0]!)}`
-  }
-  if (movedNodes.length > 1) {
-    return `移动 ${movedNodes.length} 个节点`
+    if (movedNodes.length === 1) {
+      return `移动节点 · ${nodeTitle(movedNodes[0]!)}`
+    }
+    if (movedNodes.length > 1) {
+      return `移动 ${movedNodes.length} 个节点`
+    }
   }
 
   for (const k of subKeys) {
-    if (JSON.stringify(bSubs[k]?.Positions ?? {}) !== JSON.stringify(aSubs[k]?.Positions ?? {})) {
-      const n = aNodeMap.get(k)
+    if (
+      bSubs[k]?.Positions !== aSubs[k]?.Positions &&
+      JSON.stringify(bSubs[k]?.Positions ?? {}) !== JSON.stringify(aSubs[k]?.Positions ?? {})
+    ) {
+      const n = getANode(k)
       return `移动循环体节点 · ${n ? nodeTitle(n) : k}`
     }
   }
@@ -282,8 +317,10 @@ export function loadStoredGraphHistory(storageKey?: string): StoredGraphHistory 
 export function saveStoredGraphHistory(storageKey: string | undefined, state: StoredGraphHistory): void {
   if (!storageKey || state.entries.length === 0) return
   const key = STORAGE_PREFIX + storageKey
+  // 每个 GraphHistoryEntry 的 snapshot 在 createHistoryEntry 时已独立深拷贝，这里仅浅拷贝条目列表即可，
+  // 避免每次持久化时对最多 50 份千节点大图快照重复执行 structuredClone。
   const copy: StoredGraphHistory = {
-    entries: structuredClone(state.entries),
+    entries: state.entries.map((e) => ({ ...e })),
     index: state.index,
     updatedAt: state.updatedAt,
   }
@@ -392,6 +429,8 @@ export function useGraphHistory(limitOrOptions: number | GraphHistoryOptions = D
   const lastCoalesceRef = useRef<{ key: string; at: number }>({ key: '', at: 0 })
   const restoringRef = useRef(false)
   const lastSeenDocRef = useRef<GraphUI | undefined>(currentDocument)
+  // 仅当历史栈内容实际发生变化时递增版本号，驱动防抖持久化 effect，避免宿主组件因选中、运行态或面板切换重渲染时反复触发全栈序列化
+  const historyVersionRef = useRef(initialRef.current.current ? 1 : 0)
   const [, setTick] = useState(0)
   const bump = useCallback(() => setTick((n) => n + 1), [])
 
@@ -418,7 +457,9 @@ export function useGraphHistory(limitOrOptions: number | GraphHistoryOptions = D
     if (!restoringRef.current) {
       if (!currentRef.current) {
         currentRef.current = createHistoryEntry(currentDocument, '初始版本')
+        historyVersionRef.current += 1
       } else if (!sameGraphSnapshot(currentRef.current.snapshot, currentDocument)) {
+        historyVersionRef.current += 1
         const staged = stagedRef.current
         stagedRef.current = null
         const now = Date.now()
@@ -480,14 +521,15 @@ export function useGraphHistory(limitOrOptions: number | GraphHistoryOptions = D
     }
   }
 
-  // 防抖写入 localStorage，避免拖拽连续帧频繁序列化阻塞主线程
+  // 仅当历史栈版本实际变化时防抖写入 localStorage，避免无关重渲染或拖拽途中触发全栈序列化阻塞主线程
+  const historyVersion = historyVersionRef.current
   useEffect(() => {
-    if (!storageKey) return
+    if (!storageKey || historyVersion === 0) return
     const timer = setTimeout(() => {
       persistNow()
     }, 180)
     return () => clearTimeout(timer)
-  })
+  }, [storageKey, historyVersion, persistNow])
 
   const isRestoring = useCallback(() => restoringRef.current, [])
 
@@ -536,8 +578,9 @@ export function useGraphHistory(limitOrOptions: number | GraphHistoryOptions = D
           const prevLabel = stagedRef.current.label || describeGraphDiff(prevBase, document)
           currentRef.current = createHistoryEntry(document, prevLabel)
         }
+        // 画布文档在 React 状态链路中不可变，直接暂存引用即可，避免在鼠标按下起拖第 1 帧或空点击时执行全图 structuredClone
         stagedRef.current = {
-          snapshot: structuredClone(document),
+          snapshot: document,
           label: pushOpts.label,
           coalesceKey: pushOpts.coalesceKey,
           at: Date.now(),

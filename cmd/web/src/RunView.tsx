@@ -30,11 +30,14 @@ import {
   buildDebugOptions,
   buildRunStatusMaps,
   canSetBreakpointOnNode,
+  collectRunInputValues,
   edgesOnRemovedOutputs,
   endpointIds,
+  formatRunInputValue,
   graphDecorationNodePack,
   graphEditorCanvasConfig,
   GraphInputsFields,
+  GraphNodeContextMenu,
   GraphNodePropsPanel,
   GraphPalette,
   GraphWorkbench,
@@ -46,13 +49,17 @@ import {
   loadStoredGraphHistory,
   overlayDebugWaitingRuns,
   overlayIsHung,
+  overlayIsRunning,
+  packSpecOf,
   parseGraphUI,
   recallDebugSession,
   rememberDebugSession,
+  resolveEffectiveEndpoints,
   resolveEndpointSides,
-  resolveGraphNodeEndpoints,
   rotateEndpointSides,
   runInputFieldsFromSchema,
+  formatRunInputIssues,
+  validateRunInput,
   sameGraphSnapshot,
   scopeGraphOf,
   scopedId,
@@ -61,6 +68,7 @@ import {
   useGraphDocument,
   useGraphHistory,
   withEndpointSides,
+  withNodeEndpointSides,
   type EndpointSides,
   type GraphDebugInject,
   type GraphDefinition,
@@ -73,6 +81,7 @@ import {
   type GraphTaskPolicy,
   type GraphTaskSnapshot,
   type GraphTaskSummary,
+  type GraphUI,
   type GraphViewState,
   type GraphWatchEvent,
   type RunStatus,
@@ -83,45 +92,6 @@ import { api } from './api'
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELED'])
 
 type BottomTab = 'detail' | 'io' | 'list'
-
-/** 输入框文本 → 运行输入值：能解析为 JSON 时取解析结果（数字、布尔、数组等；兼容中文全角括号与逗号），否则按字符串传入。 */
-function parseInputValue(text: string): unknown {
-  try {
-    return JSON.parse(text)
-  } catch {
-    const normalized = text
-      .trim()
-      .replace(/【/g, '[')
-      .replace(/】/g, ']')
-      .replace(/｛/g, '{')
-      .replace(/｝/g, '}')
-      .replace(/，/g, ',')
-      .replace(/：/g, ':')
-      .replace(/[“”]/g, '"')
-    if (
-      (normalized.startsWith('[') && normalized.endsWith(']')) ||
-      (normalized.startsWith('{') && normalized.endsWith('}'))
-    ) {
-      try {
-        return JSON.parse(normalized)
-      } catch {
-        // 仍无法解析为 JSON 时保留原文本
-      }
-    }
-    return text
-  }
-}
-
-/** 运行输入值 → 输入框文本：字符串原样显示，其余序列化为紧凑 JSON。 */
-function formatInputValue(val: unknown): string {
-  if (val === undefined || val === null) return ''
-  if (typeof val === 'string') return val
-  try {
-    return JSON.stringify(val)
-  } catch {
-    return String(val)
-  }
-}
 
 /** 格式化值供面板预览。 */
 function formatPreview(val: unknown): string {
@@ -217,15 +187,27 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
   const [saving, setSaving] = useState(false)
   const [savedToast, setSavedToast] = useState(false)
   const [showHistoryPopover, setShowHistoryPopover] = useState(false)
-  // 右侧节点属性编辑抽屉开关：单击画布节点时打开，关闭或点空白处收起
+  // 右侧节点属性编辑抽屉开关：由右键菜单「打开属性」或顶栏按钮打开，点空白处收起
   const [showNodeProps, setShowNodeProps] = useState(false)
+  // 画布容器：用于把右键 client 坐标换成相对容器的菜单位置
+  const canvasContainerRef = useRef<HTMLDivElement>(null)
+  // 节点右键菜单：相对画布容器的像素坐标 + 目标节点 ID
+  const [nodeContextMenu, setNodeContextMenu] = useState<{
+    x: number
+    y: number
+    nodeId: string
+  } | null>(null)
 
   const [engines, setEngines] = useState<string[]>([])
   const [engine, setEngine] = useState(doc.Engine || 'immediate')
   // 运行输入：直接从当前画布文档的 Graph.InputSchema 实时读取，修改定义后立即同步输入框
   const declared = runInputFieldsFromSchema(editor.document.Graph.InputSchema)
   const [values, setValues] = useState<Record<string, string>>({})
+  /** 启动前 Schema 校验失败时按参数名回填到运行参数面板 */
+  const [inputFieldErrors, setInputFieldErrors] = useState<Record<string, string>>({})
   const [showSchemaPopover, setShowSchemaPopover] = useState(false)
+  /** 运行参数弹窗：fill=填值；declare=编辑 InputSchema 声明 */
+  const [inputsMode, setInputsMode] = useState<'fill' | 'declare'>('fill')
   // watchTaskID 仅在需要 SSE 实时订阅时非空；查看已结束的历史任务时直接设置 snap
   const [watchTaskID, setWatchTaskID] = useState('')
   const [snap, setSnap] = useState<GraphTaskSnapshot | null>(null)
@@ -251,7 +233,7 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
   const [injects, setInjects] = useState<Record<string, GraphDebugInject>>(initialDebug.injects)
   const [maxAttempts, setMaxAttempts] = useState<number>(initialDebug.maxAttempts)
   const [retryDelayMS, setRetryDelayMS] = useState<number>(initialDebug.retryDelayMS)
-  const [failPolicy, setFailPolicy] = useState<'fail_fast' | 'continue'>(initialDebug.failPolicy)
+  const failPolicy = 'fail_fast' as const
   const [showPolicyPopover, setShowPolicyPopover] = useState(false)
   const [targetRunID, setTargetRunID] = useState<string>('')
   const [debugHint, setDebugHint] = useState<string>('')
@@ -355,53 +337,50 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
   const patchEndpointSides = useCallback(
     (id: string, sides: EndpointSides) => {
       captureBefore(`旋转端点方位 · ${id}`)
-      editor.setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, endpointSides: sides } : n)))
+      editor.setNodes((ns) => withNodeEndpointSides(ns, id, sides))
     },
     [captureBefore, editor],
   )
 
-  const specOf = useCallback(
-    (type: string) => pack?.definitions.find((d) => d.nodeType === type)?.spec,
-    [pack],
-  )
+  // 按落图种类查种类描述（与 Editor 共用 ui 包的 packSpecOf，同一 spec 的 preset 条目共用同一份 spec）
+  const specOf = useCallback((type: string) => packSpecOf(pack, type), [pack])
   const selectedSpec = selectedEditorNode ? specOf(selectedEditorNode.type) : undefined
   const selectedEndpoints = useMemo(
     () =>
       selectedEditorNode
-        ? resolveGraphNodeEndpoints(
-            selectedEditorNode.type,
-            selectedSpec?.Endpoints ?? activePack.registry.get(selectedEditorNode.type)?.displayEndpoints,
-            selectedEditorNode.config,
-            selectedSpec?.Renderer,
-          )
+        ? resolveEffectiveEndpoints(selectedEditorNode.type, selectedSpec, activePack.registry, selectedEditorNode.config)
         : undefined,
     [selectedEditorNode, selectedSpec, activePack],
   )
+  // 仅依赖 Graph 结构与选中节点 ID，使拖拽移动节点或缩放便签（仅 UI 布局变化）时不触发全图上游输出源重算
   const selectedSources = useMemo(() => {
-    const at = selectedEditorNode ? scopeGraphOf(editor.document, selectedEditorNode.id) : undefined
+    const at = selectedNodeId ? scopeGraphOf({ Graph: editor.document.Graph }, selectedNodeId) : undefined
     return at ? inputSourcesFor(at.graph, at.localId, specOf) : []
-  }, [editor.document, selectedEditorNode, specOf])
+  }, [editor.document.Graph, selectedNodeId, specOf])
 
   /** 保存当前画布结构、节点配置与运行参数 Schema。 */
-  const save = useCallback(async (): Promise<boolean> => {
-    setSaving(true)
-    setError('')
-    try {
-      const current = withEndpointSides(editor.getDocument(), activePack.registry)
-      const saved = await api.save(doc.GraphID, { Name: doc.Name, Description: doc.Description, ...current })
-      const normalized = { ...saved, UI: parseGraphUI(saved.UI) }
-      editor.load(normalized)
-      onSaved?.(normalized)
-      setSavedToast(true)
-      setTimeout(() => setSavedToast(false), 1800)
-      return true
-    } catch (e) {
-      setError(String(e))
-      return false
-    } finally {
-      setSaving(false)
-    }
-  }, [editor, activePack.registry, doc.GraphID, doc.Name, doc.Description, onSaved])
+  const save = useCallback(
+    async (overrideDoc?: GraphUI): Promise<boolean> => {
+      setSaving(true)
+      setError('')
+      try {
+        const current = withEndpointSides(overrideDoc ?? editor.getDocument(), activePack.registry)
+        const saved = await api.save(doc.GraphID, { Name: doc.Name, Description: doc.Description, ...current })
+        const normalized = { ...saved, UI: parseGraphUI(saved.UI) }
+        editor.load(normalized)
+        onSaved?.(normalized)
+        setSavedToast(true)
+        setTimeout(() => setSavedToast(false), 1800)
+        return true
+      } catch (e) {
+        setError(String(e))
+        return false
+      } finally {
+        setSaving(false)
+      }
+    },
+    [editor, activePack.registry, doc.GraphID, doc.Name, doc.Description, onSaved],
+  )
 
   const activeGraph = snap?.Task.Graph?.Nodes?.length ? snap.Task.Graph : editor.document.Graph
 
@@ -419,6 +398,15 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
     [breakpoints, nodeById],
   )
   const breakpointSet = useMemo(() => new Set(validBreakpoints), [validBreakpoints])
+  const validInjects = useMemo(() => {
+    const out: Record<string, GraphDebugInject> = {}
+    for (const [id, inj] of Object.entries(injects)) {
+      if (nodeById.has(id) && isDebugInjectActive(inj)) {
+        out[id] = inj
+      }
+    }
+    return out
+  }, [injects, nodeById])
 
   // 当前停在调试关口（WaitReason === 'debug'）上的所有 Run
   const debugWaitingRuns = useMemo(() => overlayDebugWaitingRuns(snap), [snap])
@@ -446,33 +434,62 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
 
   const view = useMemo<GraphViewState>(() => {
     const nodes: NonNullable<GraphViewState['nodes']> = { ...(editor.view.nodes ?? {}) }
-    if (maps) {
-      for (const [id, status] of Object.entries(maps.nodeStatus)) {
-        const isDebugParked = debugWaitingNodeIds.has(id)
-        const progress = isDebugParked
+    const edges: NonNullable<GraphViewState['edges']> = { ...(editor.view.edges ?? {}) }
+    const knownNodeIds = new Set<string>([
+      ...Object.keys(nodes),
+      ...((activeGraph.Nodes ?? []).map((n) => n.ID)),
+    ])
+    const knownEdgeIds = new Set<string>([
+      ...Object.keys(edges),
+      ...((activeGraph.Edges ?? []).map((e) => e.ID)),
+    ])
+
+    // 运行染色以当前 snap 的 maps 为唯一来源：无 maps 或不在 maps 中的节点/边必须清掉残留
+    // runStatus，否则再次执行停在断点时仍会看到上次的成功/失败染色。
+    // Run overlay is driven solely by current snapshot maps; clear stale statuses otherwise.
+    for (const id of knownNodeIds) {
+      const status = maps?.nodeStatus[id]
+      const isDebugParked = Boolean(status && debugWaitingNodeIds.has(id))
+      const progress = status
+        ? isDebugParked
           ? breakpointSet.has(id)
             ? '⏸ 断点'
             : '⏸ 单步'
-          : maps.nodeProgress[id]
-        nodes[id] = {
-          ...nodes[id],
-          runStatus: status,
-          runProgress: progress,
-        }
+          : maps?.nodeProgress[id]
+        : undefined
+      const prev = nodes[id]
+      const nextStatus = status
+      const nextProgress = progress
+      if (prev?.runStatus === nextStatus && prev?.runProgress === nextProgress) continue
+      nodes[id] = {
+        ...prev,
+        runStatus: nextStatus,
+        runProgress: nextProgress,
       }
     }
-    for (const bpId of validBreakpoints) {
-      nodes[bpId] = {
-        ...nodes[bpId],
-        breakpoint: true,
+    for (const id of knownEdgeIds) {
+      const status = maps?.edgeStatus[id]
+      const prev = edges[id]
+      const nextAnimated = status === 'running' ? true : undefined
+      if (prev?.runStatus === status && prev?.animated === nextAnimated) continue
+      edges[id] = {
+        ...prev,
+        runStatus: status,
+        animated: nextAnimated,
       }
     }
-    for (const [injId, inj] of Object.entries(injects)) {
-      if (isDebugInjectActive(inj)) {
-        nodes[injId] = {
-          ...nodes[injId],
-          inject: true,
-        }
+
+    // 断点 / 注入标记以会话状态为唯一来源：对所有已知节点显式写 true/false，
+    // 避免 editor.view 里残留的 breakpoint:true 让画布红点与「添加断点 (N)」数量不一致。
+    for (const id of knownNodeIds) {
+      const hasBp = breakpointSet.has(id)
+      const hasInj = Boolean(validInjects[id] && isDebugInjectActive(validInjects[id]))
+      const prev = nodes[id]
+      if (Boolean(prev?.breakpoint) === hasBp && Boolean(prev?.inject) === hasInj) continue
+      nodes[id] = {
+        ...prev,
+        breakpoint: hasBp,
+        inject: hasInj,
       }
     }
     if (selectedNodeId) {
@@ -481,18 +498,17 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
         selected: true,
       }
     }
-    const edges: NonNullable<GraphViewState['edges']> = { ...(editor.view.edges ?? {}) }
-    if (maps) {
-      for (const [id, status] of Object.entries(maps.edgeStatus)) {
-        edges[id] = {
-          ...edges[id],
-          runStatus: status,
-          animated: status === 'running',
-        }
-      }
-    }
     return { nodes, edges }
-  }, [editor.view, maps, debugWaitingNodeIds, breakpointSet, validBreakpoints, injects, selectedNodeId])
+  }, [
+    editor.view,
+    maps,
+    debugWaitingNodeIds,
+    breakpointSet,
+    validInjects,
+    selectedNodeId,
+    activeGraph.Nodes,
+    activeGraph.Edges,
+  ])
 
   // 当任务停在新的调试关口（断点或单步）时，自动选中该节点并将左侧步骤列表滚动到可视区
   useEffect(() => {
@@ -560,21 +576,23 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
   }, [watchTaskID, refreshTaskList])
 
   const currentTaskID = snap?.Task.TaskID || watchTaskID
-  const isRunning = snap?.Task.Status === 'RUNNING' || snap?.Task.Status === 'PENDING'
   const isHung = overlayIsHung(snap)
-  const isPausedOrDebugWaiting = Boolean(snap?.Task.Paused || debugWaitingRuns.length > 0 || isHung)
+  // 区分「调试挂起（Task.Paused 或存在 WaitReason==='debug' 的 Run）」与「任务仍在推进（含 WAITING(subgraph) 与 WAITING(join)）」：
+  // 仅当真正处于调试挂起时才展示「单步下一步 / 继续」；单纯子图或汇合等待仍视为运行中，允许点击「暂停」或「取消」。
+  const isPausedOrDebugWaiting = Boolean(snap?.Task.Paused || debugWaitingRuns.length > 0)
+  const isRunning = overlayIsRunning(snap)
 
   const flashDebugHint = useCallback((msg: string) => {
     setDebugHint(msg)
     setTimeout(() => setDebugHint((cur) => (cur === msg ? '' : cur)), 3800)
   }, [])
 
-  /** 构造当前表单填写的运行输入字典。 */
+  /** 构造当前填写的运行输入字典（涵盖按行输入与 JSON 批量粘贴的参数值）。 */
   const collectFormInput = useCallback((): Record<string, unknown> => {
-    return Object.fromEntries(
-      declared.filter((f) => (values[f.name] ?? '') !== '').map((f) => [f.name, parseInputValue(values[f.name])]),
-    )
+    return collectRunInputValues(declared, values)
   }, [declared, values])
+
+  const filledInputCount = useMemo(() => Object.keys(collectFormInput()).length, [collectFormInput])
 
   /** 组装启动或重试时的 TaskPolicy（含重试策略、失败策略、单步、断点与节点注入）。 */
   const buildTaskPolicy = useCallback(
@@ -596,21 +614,74 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
     [doc.UI?.ExecutionMode, failPolicy, maxAttempts, retryDelayMS, validBreakpoints, injects],
   )
 
-  /** 启动新任务：若画布有未保存的编辑改动先自动保存，再按最新图版本启动。stepMode=true 时以单步调试模式启动。 */
+  /**
+   * 清空画布上的运行轨迹染色（节点/边 runStatus），保留断点与调试注入。
+   * Clears run overlay styling from the canvas view while keeping breakpoints/injects.
+   */
+  const clearRunOverlay = useCallback(() => {
+    setSnap(null)
+    setWatchTaskID('')
+    lastAutoFocusedDebugRunRef.current = ''
+    const prevNodes = editor.view.nodes
+    const prevEdges = editor.view.edges
+    if (!prevNodes && !prevEdges) return
+    let changed = false
+    const nextNodes = prevNodes ? { ...prevNodes } : undefined
+    if (nextNodes) {
+      for (const [id, v] of Object.entries(nextNodes)) {
+        if (v.runStatus !== undefined || v.runProgress !== undefined) {
+          nextNodes[id] = { ...v, runStatus: undefined, runProgress: undefined }
+          changed = true
+        }
+      }
+    }
+    const nextEdges = prevEdges ? { ...prevEdges } : undefined
+    if (nextEdges) {
+      for (const [id, v] of Object.entries(nextEdges)) {
+        if (v.runStatus !== undefined || v.animated !== undefined) {
+          nextEdges[id] = { ...v, runStatus: undefined, animated: undefined }
+          changed = true
+        }
+      }
+    }
+    if (changed) {
+      editor.setView({
+        nodes: nextNodes,
+        edges: nextEdges,
+      })
+    }
+  }, [editor])
+
+  /** 启动新任务：若画布有未保存的编辑改动（或 JSON 输入中带入未声明的新参数键）先自动保存，再按最新图版本启动。stepMode=true 时以单步调试模式启动。 */
   const startWithMode = useCallback(
     async (stepMode: boolean, overrideInput?: Record<string, unknown>, overrideMaxAttempts?: number) => {
       setError('')
       setDebugHint('')
+      setInputFieldErrors({})
+      // 启动只按已声明的 InputSchema 填值校验；未声明键不再自动写入 Schema（声明在设计态改）。
+      const nextSchema = editor.document.Graph.InputSchema
+      const input = overrideInput ?? collectFormInput()
+      const check = validateRunInput(nextSchema, input)
+      if (!check.ok) {
+        const byField: Record<string, string> = {}
+        for (const issue of check.issues) {
+          const key = issue.path.replace(/^\//, '').split('/')[0]
+          if (key && !byField[key]) byField[key] = issue.message
+        }
+        setInputFieldErrors(byField)
+        setError(`运行参数不符合类型声明：${formatRunInputIssues(check.issues)}`)
+        setShowSchemaPopover(true)
+        setInputsMode('fill')
+        return
+      }
       if (isDirty) {
         const ok = await save()
         if (!ok) return
       }
-      setSnap(null)
-      setWatchTaskID('')
+      // 新一次执行前先清空上次运行轨迹，避免断点挂起时仍残留旧节点/边染色；断点与注入保留。
+      clearRunOverlay()
       setShowNodeProps(false)
-      lastAutoFocusedDebugRunRef.current = ''
       try {
-        const input = overrideInput ?? collectFormInput()
         const receipt = await api.startTask({
           GraphID: doc.GraphID,
           Engine: engine,
@@ -625,7 +696,18 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
         setError(String(e))
       }
     },
-    [isDirty, save, doc.GraphID, engine, collectFormInput, buildTaskPolicy, bottomTab, refreshTaskList],
+    [
+      editor,
+      isDirty,
+      save,
+      clearRunOverlay,
+      doc.GraphID,
+      engine,
+      collectFormInput,
+      buildTaskPolicy,
+      bottomTab,
+      refreshTaskList,
+    ],
   )
 
   const run = () => startWithMode(false)
@@ -643,8 +725,8 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
       }
       setError('')
       try {
-        // 若任务正在运行且尚未暂停、也没有停在 debug 的 Run，则先发送 pause 让其在下一个活动节点停下
-        if (isRunning && !snap?.Task.Paused && debugWaitingRuns.length === 0) {
+        // 若任务正在运行（含子图/汇合等待）且尚未暂停、也没有停在 debug 的 Run，则先发送 pause 让其在下一个活动节点停下
+        if (isRunning && !isPausedOrDebugWaiting) {
           await api.pause(currentTaskID)
           flashDebugHint('已请求单步挂起，当前节点完成后将在下一个活动节点前停住')
           return
@@ -668,9 +750,8 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
       currentTaskID,
       isRunning,
       isHung,
+      isPausedOrDebugWaiting,
       startWithMode,
-      snap?.Task.Paused,
-      debugWaitingRuns.length,
       activeDebugRun?.RunID,
       validBreakpoints,
       injects,
@@ -681,11 +762,15 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
   /**
    * 执行到断点 / 继续（Continue）：
    * - 任务尚未运行或已结束：启动任务并一直运行至命中第一个断点（或结束）；
-   * - 任务处于调试挂起或已暂停：发送 DebugAction="continue"，关闭单步并放行所有挂起 Run，直至命中下一个断点或结束。
+   * - 任务处于调试挂起或已暂停：发送 DebugAction="continue"，关闭单步并放行所有挂起 Run，直至命中下一个断点或结束；
+   * - 任务正在正常推进（含 WAITING(subgraph) / WAITING(join) 且无调试挂起）：忽略操作，避免触发后端 409 Conflict。
    */
   const continueToBreakpoint = useCallback(async () => {
     if (!currentTaskID || (!isRunning && !isHung)) {
       await startWithMode(false)
+      return
+    }
+    if (!isPausedOrDebugWaiting) {
       return
     }
     setError('')
@@ -703,7 +788,7 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
     } catch (e) {
       setError(String(e))
     }
-  }, [currentTaskID, isRunning, isHung, startWithMode, validBreakpoints, injects])
+  }, [currentTaskID, isRunning, isHung, isPausedOrDebugWaiting, startWithMode, validBreakpoints, injects])
 
   const pause = useCallback(async () => {
     if (!currentTaskID) return
@@ -746,7 +831,10 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
         if (!hasFormInput && prevInput && Object.keys(prevInput).length > 0) {
           const nextVals: Record<string, string> = {}
           for (const f of declared) {
-            if (f.name in prevInput) nextVals[f.name] = formatInputValue(prevInput[f.name])
+            if (f.name in prevInput) nextVals[f.name] = formatRunInputValue(prevInput[f.name])
+          }
+          for (const [k, v] of Object.entries(prevInput)) {
+            if (!(k in nextVals) && v !== undefined) nextVals[k] = formatRunInputValue(v)
           }
           setValues(nextVals)
         }
@@ -804,10 +892,19 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
     [nodeById, flashDebugHint, syncDebugToRunningTask, injects],
   )
 
-  const clearAllBreakpoints = useCallback(() => {
-    setBreakpoints([])
-    syncDebugToRunningTask([], injects)
-  }, [syncDebugToRunningTask, injects])
+  /** 取消当前选中节点上的断点（不是清空全部）。Removes breakpoint on the selected node only. */
+  const clearSelectedBreakpoint = useCallback(() => {
+    if (!selectedNodeId) {
+      flashDebugHint('请先选中带断点的节点')
+      return
+    }
+    if (!breakpointSet.has(selectedNodeId)) {
+      flashDebugHint(`节点 ${selectedNodeId} 当前没有断点`)
+      return
+    }
+    const kind = nodeById.get(selectedNodeId)?.Kind
+    toggleBreakpoint(selectedNodeId, kind)
+  }, [selectedNodeId, breakpointSet, nodeById, toggleBreakpoint, flashDebugHint])
 
   /** 更新某个节点的调试注入（Vars / Failed / Error）。 */
   const updateNodeInject = useCallback(
@@ -827,30 +924,36 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
   )
 
   /** 在「执行列表」中点击某条历史任务：加载快照并回放画布轨迹。 */
+  const historyReqRef = useRef(0)
   const selectHistoryTask = async (row: GraphTaskSummary) => {
+    const reqId = ++historyReqRef.current
     setError('')
+    setWatchTaskID('')
     try {
-      if (TERMINAL.has(row.Status)) {
-        setWatchTaskID('')
-        const s = await api.snapshot(row.TaskID)
-        setSnap(s)
-      } else {
-        const s = await api.snapshot(row.TaskID)
-        setSnap(s)
+      const s = await api.snapshot(row.TaskID)
+      if (historyReqRef.current !== reqId) return
+      setSnap(s)
+      if (!TERMINAL.has(row.Status) && !TERMINAL.has(s.Task.Status)) {
         setWatchTaskID(row.TaskID)
       }
     } catch (e) {
+      if (historyReqRef.current !== reqId) return
       setError(String(e))
     }
   }
 
-  /** 把某次任务的运行输入回填到顶部输入框。 */
+  /** 把某次任务的运行输入回填到运行参数弹窗。 */
   const fillInputsFromTask = (input?: Record<string, unknown>) => {
     if (!input) return
     const next: Record<string, string> = {}
     for (const f of declared) {
       if (f.name in input) {
-        next[f.name] = formatInputValue(input[f.name])
+        next[f.name] = formatRunInputValue(input[f.name])
+      }
+    }
+    for (const [k, v] of Object.entries(input)) {
+      if (!(k in next) && v !== undefined) {
+        next[k] = formatRunInputValue(v)
       }
     }
     setValues(next)
@@ -1048,8 +1151,8 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
   )
   const totalNodeCount = activeGraph.Nodes?.length ?? 0
   const activeInjectCount = useMemo(
-    () => Object.values(injects).filter((inj) => isDebugInjectActive(inj)).length,
-    [injects],
+    () => Object.keys(validInjects).length,
+    [validInjects],
   )
 
   return (
@@ -1287,115 +1390,16 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
             {editor.document.Graph.Nodes.length} 节点 · {editor.document.Graph.Edges.length} 连线
           </span>
           <span className="hidden lg:inline text-muted-foreground/60">
-            · 单击编辑节点 · 双击打断点 · 按 R 旋转端点 · ⌘S 保存
+            · 单击选中 · 右键打开属性 · 双击打断点 · 按 R 旋转端点 · ⌘S 保存
           </span>
         </div>
       </div>
 
       {/* ========================================================================
-          第二行（Row 2）：节点执行与在线 DEBUG 控制组（执行、单步、暂停、继续、重试、运行参数、断点）
+          第二行（Row 2）：配置（引擎 / 运行参数 / 重试策略）→ 执行与断点 → 报错信息（有则显）
           ======================================================================== */}
       <div className="relative z-30 flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-background px-3 py-2">
-        <span className="rounded bg-indigo-500/10 px-2 py-1 text-[11px] font-medium text-indigo-600 dark:text-indigo-400 select-none">
-          节点执行控制
-        </span>
-
-        {/* 1. 执行、单步、暂停、继续、重试、取消 */}
-        <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-          {!isRunning && !isHung ? (
-            <>
-              <button
-                type="button"
-                onClick={run}
-                title={
-                  validBreakpoints.length > 0
-                    ? `启动任务并执行到首个命中的断点（当前共 ${validBreakpoints.length} 个断点，快捷键 F8）`
-                    : '启动任务（快捷键 F8）'
-                }
-                className="inline-flex h-8 items-center gap-1.5 rounded-ui bg-primary px-3 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 cursor-pointer"
-              >
-                <Play className="h-3.5 w-3.5 fill-current" />
-                {validBreakpoints.length > 0 ? `执行到断点 (${validBreakpoints.length})` : '开始执行'}
-              </button>
-              <button
-                type="button"
-                onClick={() => void stepOnce()}
-                title="以单步模式启动调试：在进入第一个节点前自动停住（快捷键 F10）"
-                className="inline-flex h-8 items-center gap-1 rounded-ui border border-amber-500/40 bg-amber-500/10 px-2.5 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-500/20 dark:text-amber-300 cursor-pointer"
-              >
-                <StepForward className="h-3.5 w-3.5" />
-                单步执行
-              </button>
-            </>
-          ) : null}
-
-          {isRunning && !snap?.Task.Paused ? (
-            <button
-              type="button"
-              onClick={pause}
-              title="暂停任务：当前节点完成后，在进入下一个节点前挂起"
-              className="inline-flex h-8 items-center gap-1 rounded-ui border border-amber-500/40 bg-amber-500/10 px-2.5 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-500/20 dark:text-amber-300 cursor-pointer"
-            >
-              <Pause className="h-3.5 w-3.5" />
-              暂停
-            </button>
-          ) : null}
-
-          {isPausedOrDebugWaiting ? (
-            <>
-              <button
-                type="button"
-                onClick={() => void stepOnce()}
-                title="单步执行当前挂起的节点，并在下一个节点前再次停住（快捷键 F10）"
-                className="inline-flex h-8 items-center gap-1 rounded-ui bg-amber-500 px-2.5 text-xs font-semibold text-white transition-colors hover:bg-amber-600 cursor-pointer"
-              >
-                <StepForward className="h-3.5 w-3.5" />
-                单步下一步
-              </button>
-              <button
-                type="button"
-                onClick={() => void continueToBreakpoint()}
-                title={
-                  validBreakpoints.length > 0
-                    ? '关闭单步并继续运行，直到命中下一个断点或任务结束（快捷键 F8）'
-                    : '关闭单步并继续全速运行至结束（快捷键 F8）'
-                }
-                className="inline-flex h-8 items-center gap-1 rounded-ui bg-primary px-2.5 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 cursor-pointer"
-              >
-                <FastForward className="h-3.5 w-3.5" />
-                {validBreakpoints.length > 0 ? '执行到断点' : '继续'}
-              </button>
-            </>
-          ) : null}
-
-          {snap ? (
-            <button
-              type="button"
-              onClick={() => void retryTask()}
-              title="使用当前输入、断点与重试策略重新执行任务"
-              className="inline-flex h-8 items-center gap-1 rounded-ui border border-border bg-background px-2.5 text-xs font-medium text-foreground transition-colors hover:bg-muted/60 cursor-pointer"
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-              重试
-            </button>
-          ) : null}
-
-          {isRunning || isHung ? (
-            <button
-              type="button"
-              onClick={cancel}
-              title="取消正在运行或挂起的任务"
-              className="inline-flex h-8 items-center gap-1 rounded-ui border border-destructive/40 bg-destructive/10 px-2.5 text-xs font-medium text-destructive transition-colors hover:bg-destructive/20 cursor-pointer"
-            >
-              <Square className="h-3 w-3 fill-current" />
-              取消
-            </button>
-          ) : null}
-        </div>
-
-        <div className="h-4 w-px shrink-0 bg-border" />
-
-        {/* 2. 引擎与运行参数组（引擎选择 + 参数输入框 + 运行参数定义） */}
+        {/* 1. 引擎、运行参数、重试策略 */}
         <div className="flex shrink-0 flex-wrap items-center gap-1.5">
           <div className="inline-flex h-8 shrink-0 items-center">
             <span className="flex h-full shrink-0 items-center rounded-l-ui border border-r-0 border-input bg-muted/40 px-2.5 text-xs text-muted-foreground select-none">
@@ -1411,26 +1415,7 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
             />
           </div>
 
-          {declared.map((f) => (
-            <label
-              key={f.name}
-              className="inline-flex h-8 w-36 shrink-0 items-center overflow-hidden rounded-ui border border-input bg-background transition-colors focus-within:border-primary"
-            >
-              <span className="flex h-full shrink-0 items-center border-r border-input bg-muted/40 px-2 font-mono text-xs text-muted-foreground select-none">
-                {f.name}
-                {f.required ? <span className="ml-0.5 text-destructive">*</span> : null}
-              </span>
-              <input
-                aria-label={`${f.name}${f.required ? ' *' : ''}`}
-                value={values[f.name] ?? ''}
-                onChange={(e) => setValues((cur) => ({ ...cur, [f.name]: e.target.value }))}
-                className="h-full min-w-0 flex-1 bg-transparent px-2 font-mono text-xs text-foreground placeholder:text-muted-foreground/50 focus:outline-none"
-                placeholder='如 3、["a"]'
-              />
-            </label>
-          ))}
-
-          {/* 运行参数定义（InputSchema）弹出管理 */}
+          {/* 运行参数弹出面板（含「按行输入」与「JSON 输入」双页签） */}
           <div className="relative">
             <button
               type="button"
@@ -1438,20 +1423,25 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
                 setShowSchemaPopover((v) => !v)
                 setShowPolicyPopover(false)
               }}
-              title="定义或增删本工作流的运行输入参数 Schema"
+              title="配置运行参数（支持按行输入与直接粘贴完整 JSON）"
               className={`inline-flex h-8 items-center gap-1.5 rounded-ui border px-2.5 text-xs font-medium transition-colors cursor-pointer ${
-                showSchemaPopover
+                showSchemaPopover || filledInputCount > 0
                   ? 'border-primary/40 bg-primary/10 text-primary'
                   : 'border-border bg-background text-foreground hover:bg-muted/60'
               }`}
             >
               <Settings2 className="h-3.5 w-3.5" />
-              运行参数{declared.length ? ` (${declared.length})` : ''}
+              <span>运行参数{declared.length ? ` (${declared.length})` : ''}</span>
+              {filledInputCount > 0 ? (
+                <span className="rounded-full bg-primary/20 px-1.5 py-0.2 font-mono text-[10px] font-semibold text-primary">
+                  已填 {filledInputCount}
+                </span>
+              ) : null}
             </button>
             {showSchemaPopover ? (
-              <div className="absolute left-0 top-full mt-1.5 z-50 flex w-80 flex-col gap-3 rounded-ui border border-border bg-card p-3 text-xs shadow-xl">
+              <div className="absolute left-0 top-full mt-1.5 z-50 flex w-[440px] max-w-[calc(100vw-2rem)] flex-col gap-3 rounded-ui border border-border bg-card p-3 text-xs shadow-xl">
                 <div className="flex items-center justify-between border-b border-border/60 pb-1.5">
-                  <span className="font-semibold text-foreground">运行参数定义 (InputSchema)</span>
+                  <span className="font-semibold text-foreground">运行参数</span>
                   <button
                     type="button"
                     onClick={() => setShowSchemaPopover(false)}
@@ -1463,46 +1453,18 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
                 <GraphInputsFields
                   schema={editor.document.Graph.InputSchema}
                   onReplace={replaceGraphInputs}
+                  values={values}
+                  onValuesChange={(next) => {
+                    setValues(next)
+                    setInputFieldErrors({})
+                  }}
+                  fieldErrors={inputFieldErrors}
+                  mode={inputsMode}
+                  onModeChange={setInputsMode}
                 />
               </div>
             ) : null}
           </div>
-        </div>
-
-        <div className="h-4 w-px shrink-0 bg-border" />
-
-        {/* 3. 断点、重试策略与清除轨迹组 */}
-        <div className="flex shrink-0 items-center gap-1.5">
-          {activeDetailNode && canSetBreakpointOnNode(activeDetailNode.ID, activeDetailNode.Kind) ? (
-            <button
-              type="button"
-              onClick={() => toggleBreakpoint(activeDetailNode.ID, activeDetailNode.Kind)}
-              title="为当前选中的节点添加或移除断点（快捷键 F9，也可双击画布节点）"
-              className={`inline-flex h-8 items-center gap-1.5 rounded-ui border px-2.5 text-xs font-medium transition-colors cursor-pointer ${
-                breakpointSet.has(activeDetailNode.ID)
-                  ? 'border-red-500/40 bg-red-500/12 text-red-600 dark:text-red-400'
-                  : 'border-border bg-background text-foreground hover:bg-muted/60'
-              }`}
-            >
-              <CircleDot className="h-3.5 w-3.5 text-red-500" />
-              {breakpointSet.has(activeDetailNode.ID)
-                ? `取消断点 (${activeDetailNode.ID})`
-                : `打断点 (${activeDetailNode.ID})`}
-            </button>
-          ) : null}
-
-          {validBreakpoints.length > 0 ? (
-            <button
-              type="button"
-              onClick={clearAllBreakpoints}
-              title={`已设断点: ${validBreakpoints.join(', ')}（点击清空全部断点）`}
-              className="inline-flex h-8 items-center gap-1 rounded-ui border border-red-500/30 bg-red-500/10 px-2 text-xs font-medium text-red-600 transition-colors hover:bg-red-500/20 dark:text-red-400 cursor-pointer"
-            >
-              <span className="h-2 w-2 rounded-full bg-red-500" />
-              断点 ({validBreakpoints.length})
-              <Trash2 className="ml-0.5 h-3 w-3 opacity-75" />
-            </button>
-          ) : null}
 
           {/* 重试与容错策略弹出配置 */}
           <div className="relative">
@@ -1512,9 +1474,9 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
                 setShowPolicyPopover((v) => !v)
                 setShowSchemaPopover(false)
               }}
-              title="配置节点失败自动重试次数、重试间隔与失败策略"
+              title="配置节点失败自动重试次数与重试间隔"
               className={`inline-flex h-8 items-center gap-1.5 rounded-ui border px-2.5 text-xs font-medium transition-colors cursor-pointer ${
-                maxAttempts > 1 || failPolicy !== 'fail_fast' || showPolicyPopover
+                maxAttempts > 1 || showPolicyPopover
                   ? 'border-primary/40 bg-primary/10 text-primary'
                   : 'border-border bg-background text-muted-foreground hover:bg-muted/60 hover:text-foreground'
               }`}
@@ -1522,7 +1484,6 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
               <SlidersHorizontal className="h-3.5 w-3.5" />
               <span>
                 {maxAttempts > 1 ? `自动重试×${maxAttempts - 1}` : '重试策略'}
-                {failPolicy === 'continue' ? ' · 容错继续' : ''}
               </span>
             </button>
             {showPolicyPopover ? (
@@ -1565,32 +1526,165 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
                     <option value={2000}>2000 ms</option>
                   </select>
                 </div>
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-muted-foreground">分支失败策略 (FailPolicy)</span>
-                  <select
-                    value={failPolicy}
-                    onChange={(e) => setFailPolicy(e.target.value as 'fail_fast' | 'continue')}
-                    className="h-7 rounded border border-input bg-background px-2 font-mono text-xs text-foreground"
-                  >
-                    <option value="fail_fast">fail_fast（立即终止）</option>
-                    <option value="continue">continue（其余分支继续）</option>
-                  </select>
-                </div>
                 <p className="text-[11px] leading-relaxed text-muted-foreground">
                   提示：双击画布上的任意节点可直接打断点；在下方「执行明细与调试」可为节点注入变量或模拟报错以测试自动重试。
                 </p>
               </div>
             ) : null}
           </div>
+        </div>
+
+        <div className="h-4 w-px shrink-0 bg-border" />
+
+        {/* 2. 开始、单步、添加断点、取消断点（运行中仍保留暂停 / 继续 / 重试 / 取消） */}
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+          {!isRunning && !isHung ? (
+            <>
+              <button
+                type="button"
+                onClick={run}
+                title={
+                  validBreakpoints.length > 0
+                    ? `启动任务并执行到首个命中的断点（当前共 ${validBreakpoints.length} 个断点，快捷键 F8）`
+                    : '启动任务（快捷键 F8）'
+                }
+                className="inline-flex h-8 items-center gap-1.5 rounded-ui bg-primary px-3 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 cursor-pointer"
+              >
+                <Play className="h-3.5 w-3.5 fill-current" />
+                开始
+              </button>
+              <button
+                type="button"
+                onClick={() => void stepOnce()}
+                title="以单步模式启动调试：在进入第一个节点前自动停住（快捷键 F10）"
+                className="inline-flex h-8 items-center gap-1 rounded-ui border border-amber-500/40 bg-amber-500/10 px-2.5 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-500/20 dark:text-amber-300 cursor-pointer"
+              >
+                <StepForward className="h-3.5 w-3.5" />
+                单步
+              </button>
+            </>
+          ) : null}
+
+          {isRunning && !isPausedOrDebugWaiting ? (
+            <button
+              type="button"
+              onClick={pause}
+              title="暂停任务：当前节点完成后，在进入下一个节点前挂起"
+              className="inline-flex h-8 items-center gap-1 rounded-ui border border-amber-500/40 bg-amber-500/10 px-2.5 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-500/20 dark:text-amber-300 cursor-pointer"
+            >
+              <Pause className="h-3.5 w-3.5" />
+              暂停
+            </button>
+          ) : null}
+
+          {isPausedOrDebugWaiting ? (
+            <>
+              <button
+                type="button"
+                onClick={() => void stepOnce()}
+                title="单步执行当前挂起的节点，并在下一个节点前再次停住（快捷键 F10）"
+                className="inline-flex h-8 items-center gap-1 rounded-ui bg-amber-500 px-2.5 text-xs font-semibold text-white transition-colors hover:bg-amber-600 cursor-pointer"
+              >
+                <StepForward className="h-3.5 w-3.5" />
+                单步
+              </button>
+              <button
+                type="button"
+                onClick={() => void continueToBreakpoint()}
+                title={
+                  validBreakpoints.length > 0
+                    ? '关闭单步并继续运行，直到命中下一个断点或任务结束（快捷键 F8）'
+                    : '关闭单步并继续全速运行至结束（快捷键 F8）'
+                }
+                className="inline-flex h-8 items-center gap-1 rounded-ui bg-primary px-2.5 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 cursor-pointer"
+              >
+                <FastForward className="h-3.5 w-3.5" />
+                {validBreakpoints.length > 0 ? '执行到断点' : '继续'}
+              </button>
+            </>
+          ) : null}
+
+          {/* 添加断点：为当前选中节点添加；括号内为画布上已设断点的实时数量 */}
+          <button
+            type="button"
+            onClick={() => {
+              if (!selectedNodeId) {
+                flashDebugHint('请先选中可打断点的节点（快捷键 F9，也可双击画布节点）')
+                return
+              }
+              const selected = nodeById.get(selectedNodeId)
+              if (!selected || !canSetBreakpointOnNode(selectedNodeId, selected.Kind)) {
+                flashDebugHint('请先选中可打断点的节点（快捷键 F9，也可双击画布节点）')
+                return
+              }
+              if (breakpointSet.has(selectedNodeId)) {
+                flashDebugHint(`节点 ${selectedNodeId} 已有断点`)
+                return
+              }
+              toggleBreakpoint(selectedNodeId, selected.Kind)
+            }}
+            title={
+              selectedNodeId && canSetBreakpointOnNode(selectedNodeId, nodeById.get(selectedNodeId)?.Kind)
+                ? `为节点 ${selectedNodeId} 添加断点（快捷键 F9，也可双击画布节点）`
+                : '请先选中可打断点的节点（快捷键 F9，也可双击画布节点）'
+            }
+            className={`inline-flex h-8 items-center gap-1.5 rounded-ui border px-2.5 text-xs font-medium transition-colors cursor-pointer ${
+              validBreakpoints.length > 0
+                ? 'border-red-500/40 bg-red-500/12 text-red-600 dark:text-red-400'
+                : 'border-border bg-background text-foreground hover:bg-muted/60'
+            }`}
+          >
+            <CircleDot className="h-3.5 w-3.5 text-red-500" />
+            添加断点 ({validBreakpoints.length})
+          </button>
+
+          {/* 取消断点：只移除当前选中节点上的断点；数量随 validBreakpoints 实时变化 */}
+          <button
+            type="button"
+            onClick={clearSelectedBreakpoint}
+            disabled={!selectedNodeId || !breakpointSet.has(selectedNodeId)}
+            title={
+              selectedNodeId && breakpointSet.has(selectedNodeId)
+                ? `取消节点 ${selectedNodeId} 上的断点`
+                : selectedNodeId
+                  ? '当前选中节点没有断点'
+                  : '请先选中带断点的节点'
+            }
+            className="inline-flex h-8 items-center gap-1 rounded-ui border border-border bg-background px-2.5 text-xs font-medium text-foreground transition-colors hover:bg-muted/60 cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Trash2 className="h-3.5 w-3.5 opacity-75" />
+            取消断点
+          </button>
+
+          {snap ? (
+            <button
+              type="button"
+              onClick={() => void retryTask()}
+              title="使用当前输入、断点与重试策略重新执行任务"
+              className="inline-flex h-8 items-center gap-1 rounded-ui border border-border bg-background px-2.5 text-xs font-medium text-foreground transition-colors hover:bg-muted/60 cursor-pointer"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              重试
+            </button>
+          ) : null}
+
+          {isRunning || isHung ? (
+            <button
+              type="button"
+              onClick={cancel}
+              title="取消正在运行或挂起的任务"
+              className="inline-flex h-8 items-center gap-1 rounded-ui border border-destructive/40 bg-destructive/10 px-2.5 text-xs font-medium text-destructive transition-colors hover:bg-destructive/20 cursor-pointer"
+            >
+              <Square className="h-3 w-3 fill-current" />
+              取消
+            </button>
+          ) : null}
 
           {snap && !isRunning && !isHung ? (
             <button
               type="button"
-              onClick={() => {
-                setSnap(null)
-                setWatchTaskID('')
-              }}
-              title="清除画布上的运行轨迹高亮染色，恢复干净编辑态"
+              onClick={clearRunOverlay}
+              title="清除画布上的运行轨迹高亮染色（保留断点），恢复干净编辑态"
               className="inline-flex h-8 items-center gap-1 rounded-ui border border-border bg-background px-2 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground cursor-pointer"
             >
               <Eraser className="h-3.5 w-3.5" />
@@ -1599,36 +1693,22 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
           ) : null}
         </div>
 
-        {snap || error || debugHint ? (
+        {/* 3. 报错信息 / 短暂调试提示：有则显示，无则不占位 */}
+        {error || snap?.Task.Error || debugHint ? (
           <>
             <div className="h-4 w-px shrink-0 bg-border" />
             <div className="flex min-w-0 flex-1 items-center gap-2 text-xs">
-              {snap ? (
-                <>
-                  <span className={`shrink-0 rounded-full px-2 py-0.5 font-medium ${statusBadgeClass(snap.Task.Status)}`}>
-                    {snap.Task.Status}
-                  </span>
-                  <span className="shrink-0 font-mono text-muted-foreground" title={snap.Task.TaskID}>
-                    {snap.Task.TaskID.slice(0, 8)}
-                  </span>
-                  <span className="shrink-0 text-muted-foreground">
-                    {formatDuration(snap.Task.StartedAt, snap.Task.FinishedAt)}
-                  </span>
-                  {snap.Task.Error ? (
-                    <span className="min-w-0 flex-1 truncate text-destructive" title={snap.Task.Error}>
-                      {snap.Task.Error}
-                    </span>
-                  ) : null}
-                </>
+              {error || snap?.Task.Error ? (
+                <span
+                  className="min-w-0 flex-1 truncate text-destructive"
+                  title={error || snap?.Task.Error || ''}
+                >
+                  {error || snap?.Task.Error}
+                </span>
               ) : null}
               {debugHint ? (
                 <span className="min-w-0 flex-1 truncate text-amber-600 dark:text-amber-300" title={debugHint}>
                   {debugHint}
-                </span>
-              ) : null}
-              {error ? (
-                <span className="min-w-0 flex-1 truncate text-destructive" title={error}>
-                  {error}
                 </span>
               ) : null}
             </div>
@@ -1637,7 +1717,7 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
       </div>
 
       {/* 在线 DEBUG 挂起状态横幅：当任务停在断点、单步或暂停时醒目提示并提供快捷单步/继续控制 */}
-      {debugWaitingRuns.length > 0 || snap?.Task.Paused ? (
+      {isPausedOrDebugWaiting ? (
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/20 px-2 py-0.5 font-semibold text-amber-700 dark:text-amber-300">
@@ -1714,6 +1794,26 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
         registry={activePack.registry}
         palette={<GraphPalette library={activePack.library} onAdd={addNode} />}
         paletteLabel="节点库"
+        canvasContainerRef={canvasContainerRef}
+        canvasOverlay={
+          nodeContextMenu ? (
+            <GraphNodeContextMenu
+              x={nodeContextMenu.x}
+              y={nodeContextMenu.y}
+              title={nodeContextMenu.nodeId}
+              onClose={() => setNodeContextMenu(null)}
+              items={[
+                {
+                  label: '打开属性',
+                  onClick: () => {
+                    setSelectedNodeId(nodeContextMenu.nodeId)
+                    setShowNodeProps(true)
+                  },
+                },
+              ]}
+            />
+          ) : null
+        }
         propsPanel={
           selectedEditorNode && showNodeProps ? (
             <GraphNodePropsPanel
@@ -1759,11 +1859,11 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
                   ),
                 )
                 if (patch.config !== undefined) {
-                  const outputs = resolveGraphNodeEndpoints(
+                  const outputs = resolveEffectiveEndpoints(
                     selectedEditorNode.type,
-                    selectedSpec?.Endpoints ?? activePack.registry.get(selectedEditorNode.type)?.displayEndpoints,
+                    selectedSpec,
+                    activePack.registry,
                     patch.config,
-                    selectedSpec?.Renderer,
                   ).outputs
                   const stale = new Set(edgesOnRemovedOutputs(editor.edges, selectedEditorNode.id, outputs).map((e) => e.id))
                   if (stale.size > 0) editor.setEdges((es) => es.filter((e) => !stale.has(e.id)))
@@ -1775,8 +1875,16 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
                 editor.setEdges((es) =>
                   es.filter((e) => e.from !== selectedEditorNode.id && e.to !== selectedEditorNode.id),
                 )
+                setBreakpoints((prev) => prev.filter((id) => id !== selectedEditorNode.id))
+                setInjects((prev) => {
+                  if (!(selectedEditorNode.id in prev)) return prev
+                  const next = { ...prev }
+                  delete next[selectedEditorNode.id]
+                  return next
+                })
                 setSelectedNodeId(null)
                 setShowNodeProps(false)
+                setNodeContextMenu(null)
               }}
               onClose={() => setShowNodeProps(false)}
             />
@@ -1790,16 +1898,16 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
           onViewChange: editor.setView,
           onBeforeEdit: () => captureBefore(),
           canvas: graphEditorCanvasConfig,
+          // 单击仅选中节点，不自动打开属性面板（打开属性改走右键菜单 / 顶栏按钮）
           onNodeClick: (_e, node) => {
             setSelectedNodeId(node.id)
             setShowHistoryPopover(false)
-            if (!isRunning && !isHung) {
-              setShowNodeProps(true)
-            }
+            setNodeContextMenu(null)
           },
           onNodeDoubleClick: (_e, node) => {
             setSelectedNodeId(node.id)
             setShowHistoryPopover(false)
+            setNodeContextMenu(null)
             setBottomTab('detail')
             setPanelOpen(true)
             toggleBreakpoint(node.id, node.type)
@@ -1810,6 +1918,21 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
             setShowHistoryPopover(false)
             setShowPolicyPopover(false)
             setShowSchemaPopover(false)
+            setNodeContextMenu(null)
+          },
+          interaction: {
+            onNodeContextMenu: (e, node) => {
+              const rect = canvasContainerRef.current?.getBoundingClientRect()
+              const clientX = 'clientX' in e ? e.clientX : 0
+              const clientY = 'clientY' in e ? e.clientY : 0
+              setSelectedNodeId(node.id)
+              setShowHistoryPopover(false)
+              setNodeContextMenu({
+                x: clientX - (rect?.left ?? 0),
+                y: clientY - (rect?.top ?? 0),
+                nodeId: node.id,
+              })
+            },
           },
           className: 'h-full',
         }}
@@ -1925,8 +2048,11 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
             {panelOpen && bottomTab !== 'list' && snap?.Task.Input ? (
               <button
                 type="button"
-                onClick={() => fillInputsFromTask(snap.Task.Input)}
-                title="将本次任务的运行输入填入上方输入框"
+                onClick={() => {
+                  fillInputsFromTask(snap.Task.Input)
+                  flashDebugHint('已将本次任务的运行输入回填到「运行参数」弹窗')
+                }}
+                title="将本次任务的运行输入回填到「运行参数」弹窗中"
                 className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground cursor-pointer"
               >
                 <RotateCcw className="h-3 w-3" />
@@ -2460,7 +2586,7 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
                     <pre className="flex-1 overflow-auto rounded-ui border border-border/60 bg-background/60 p-2.5 font-mono text-xs text-foreground">
                       {snap.Task.Output
                         ? JSON.stringify(snap.Task.Output, null, 2)
-                        : snap.Task.Status === 'RUNNING'
+                        : isRunning
                           ? '// 任务正在运行中…'
                           : '// 暂无输出'}
                     </pre>

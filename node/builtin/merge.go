@@ -29,16 +29,16 @@ func (c MergeInput) Validate() error {
 	if !node.ValidJoinMode(c.Mode) {
 		return fmt.Errorf("Mode must be %s or %s", node.JoinAny, node.JoinAll)
 	}
-	seen := make(map[string]bool, len(c.Outputs))
 	for i, f := range c.Outputs {
 		if !graph.ValidName(f.Name) || len(f.First) == 0 {
 			return fmt.Errorf("Outputs[%d]: Name must be a literal name and First must not be empty", i)
 		}
 		// 同名字段在运行期会互相覆盖，定义期直接拒绝。
-		if seen[f.Name] {
-			return fmt.Errorf("Outputs[%d]: duplicate Name %q", i, f.Name)
+		for j := range i {
+			if c.Outputs[j].Name == f.Name {
+				return fmt.Errorf("Outputs[%d]: duplicate Name %q", i, f.Name)
+			}
 		}
-		seen[f.Name] = true
 		for j, ref := range f.First {
 			if ref.From == "" {
 				return fmt.Errorf("Outputs[%d].First[%d]: From required", i, j)
@@ -46,6 +46,18 @@ func (c MergeInput) Validate() error {
 		}
 	}
 	return nil
+}
+
+func (c MergeInput) HasOutput(field string) bool {
+	if !graph.ValidName(field) {
+		return false
+	}
+	for i := range c.Outputs {
+		if c.Outputs[i].Name == field {
+			return true
+		}
+	}
+	return false
 }
 
 func (c MergeInput) DeclareOutputs() *jsonschema.Schema {

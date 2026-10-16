@@ -23,7 +23,6 @@ import (
 type world struct {
 	t      *testing.T
 	reg    *node.Registry
-	cache  *kernel.Cache
 	env    kernel.Env
 	auto   bool
 	graphs map[string]graph.Graph // 按 GraphID 引用的子图（resolve 的数据源）
@@ -37,7 +36,6 @@ type world struct {
 	// awaiting 是测试维护的等待关系（TaskID → RunID → Slot → TaskID），模拟引擎的职责：
 	// Apply 前作为 Env.Awaiting 提供，Apply 后按 Changes.Released 与 StartChild 维护。
 	awaiting map[string]map[string]map[string]string
-	comp     map[string]*kernel.Compiled // TaskID → 编译结果
 	queue    []queued
 	log      []queued // 全部命令（含已处理的），供断言某类命令从未出现
 	ids      int
@@ -56,16 +54,15 @@ func newWorld(t *testing.T, auto bool, extra ...node.Node) *world {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := &world{t: t, reg: reg, cache: kernel.NewCache(reg), auto: auto, graphs: map[string]graph.Graph{},
+	w := &world{t: t, reg: reg, auto: auto, graphs: map[string]graph.Graph{},
 		loaded: map[string]kernel.LoadedGraph{},
 		tasks:  map[string]*engine.Task{}, runs: map[string]map[string]*engine.Run{},
-		awaiting: map[string]map[string]map[string]string{}, comp: map[string]*kernel.Compiled{}}
+		awaiting: map[string]map[string]map[string]string{}}
 	w.env = kernel.Env{
 		Now: t0,
 		// 递增 ID 保证按 RunID 排序即创建顺序，且两次运行结果可比较。
-		NewID:   func() string { w.ids++; return fmt.Sprintf("id%04d", w.ids) },
-		Compile: w.cache.Compile,
-		Graphs:  w.loaded,
+		NewID:  func() string { w.ids++; return fmt.Sprintf("id%04d", w.ids) },
+		Graphs: w.loaded,
 	}
 	w.resolve = func(_ context.Context, id string) (graph.Graph, error) {
 		g, ok := w.graphs[id]
@@ -78,28 +75,23 @@ func newWorld(t *testing.T, auto bool, extra ...node.Node) *world {
 	return w
 }
 
-// start 编译并启动根 Task，返回 TaskID；之后处理命令队列。
+// start 校验并启动根 Task，返回 TaskID；之后处理命令队列。
 func (w *world) start(g graph.Graph, input map[string]any, policy engine.TaskPolicy) string {
 	w.t.Helper()
 	req := engine.StartRequest{GraphID: "g", Graph: g, Input: input, Policy: policy}
-	c, err := w.cache.Compile(req.PinnedGraph())
+	task, err := kernel.NewTask(engine.KindImmediate, req, w.reg, w.env)
 	if err != nil {
 		w.t.Fatal(err)
 	}
-	task, err := kernel.NewTask(engine.KindImmediate, req, c, w.env)
-	if err != nil {
-		w.t.Fatal(err)
-	}
-	w.add(task, c)
+	w.add(task)
 	w.must(task.TaskID, kernel.Started{})
 	return task.TaskID
 }
 
-func (w *world) add(task *engine.Task, c *kernel.Compiled) {
+func (w *world) add(task *engine.Task) {
 	w.tasks[task.TaskID] = task.Clone()
 	w.runs[task.TaskID] = map[string]*engine.Run{}
 	w.awaiting[task.TaskID] = map[string]map[string]string{}
-	w.comp[task.TaskID] = c
 }
 
 // await 记录 parentTaskID 的 Run 开始等待子 Task（模拟引擎执行 StartChild）。
@@ -155,7 +147,7 @@ func (w *world) list(taskID string) []*engine.Run {
 // 返回本次的命令（已入队）与 Apply 的 error。
 func (w *world) apply(taskID string, ev kernel.Event) ([]kernel.Command, error) {
 	w.env.Awaiting = w.awaiting[taskID]
-	ch, cmds, err := kernel.Apply(w.comp[taskID], w.tasks[taskID], w.list(taskID), ev, w.env)
+	ch, cmds, err := kernel.Apply(w.reg, w.tasks[taskID], w.list(taskID), ev, w.env)
 	if len(ch.NeedGraphs) > 0 {
 		if err != nil || !ch.Empty() || len(cmds) != 0 {
 			w.t.Fatalf("NeedGraphs with changes or err: %+v %+v %v", ch, cmds, err)
@@ -209,7 +201,7 @@ func (w *world) must(taskID string, ev kernel.Event) []kernel.Command {
 func (w *world) call(taskID string, ev kernel.Event) (kernel.Changes, []kernel.Command, error) {
 	w.t.Helper()
 	w.env.Awaiting = w.awaiting[taskID]
-	return kernel.Apply(w.comp[taskID], w.tasks[taskID], w.list(taskID), ev, w.env)
+	return kernel.Apply(w.reg, w.tasks[taskID], w.list(taskID), ev, w.env)
 }
 
 func (w *world) save(taskID string, ch kernel.Changes) {
@@ -229,7 +221,7 @@ func (w *world) drain() {
 		w.queue = w.queue[1:]
 		switch cmd := q.cmd.(type) {
 		case kernel.StartChild:
-			w.add(cmd.Task, cmd.Compiled)
+			w.add(cmd.Task)
 			w.must(cmd.Task.TaskID, kernel.Started{})
 		case kernel.NotifyParent:
 			if _, ok := w.tasks[cmd.ParentTaskID]; ok {
@@ -264,7 +256,7 @@ func (w *world) dispatch(taskID, runID string) *engine.Run {
 func (w *world) run(taskID, runID string) kernel.ActivityDone {
 	w.t.Helper()
 	r := w.dispatch(taskID, runID)
-	act, err := kernel.NewActivity(w.comp[taskID], w.tasks[taskID], r)
+	act, err := kernel.NewActivity(w.reg, w.tasks[taskID], r)
 	if err != nil {
 		w.t.Fatal(err)
 	}
@@ -299,8 +291,8 @@ func (w *world) task(taskID string) *engine.Task { return w.tasks[taskID] }
 func (w *world) dump(taskID string) string {
 	var b strings.Builder
 	for _, r := range w.list(taskID) {
-		fmt.Fprintf(&b, "\n  %s parent=%s node=%s %s/%s seq=%d attempt=%d err=%q",
-			r.RunID, r.ParentRunID, r.NodeID, r.Status, r.WaitReason, r.Seq, r.Attempt, r.Error)
+		fmt.Fprintf(&b, "\n  %s node=%s %s/%s seq=%d attempt=%d err=%q",
+			r.RunID, r.NodeID, r.Status, r.WaitReason, r.Seq, r.Attempt, r.Error)
 	}
 	return b.String()
 }

@@ -19,7 +19,6 @@ import (
 //   - 等待关系只记在子 Task 行上：子 Task 的 Awaited 表示父 Run 仍在等待它（loadAwaiting 构造成
 //     Env.Awaiting 传给 Apply，writeChanges 按 Changes.Released 清除），父子关系由子 Task 的
 //     ParentTaskID / ParentRunID / Slot 记录；
-//   - 分片由本引擎决定：根 Task 为 shardOf(TaskID)，子 Task 沿用父 Task 的分片，新建 Run 写入所属 Task 的分片；
 //   - 写回已有 Run 的条件为读取时的 Status 与 LeaseToken（领取不锁 Task 行，可能与写回并发）；
 //     任何一行没有命中就回滚并重做整个事务（重新读取、重新 Apply），见设计文档 8.4、迁移计划第 33 条；
 //   - StartChild 在同一事务内插入子 Task 并对它应用 Started；
@@ -46,14 +45,11 @@ type DurableTask struct {
 func (DurableTask) TableName() string { return "tb_graph_task" }
 
 // DurableRun 是 durable 引擎在 tb_graph_run 表上的行结构（设计文档 8.2–8.4）：
-// 内嵌语义模型 engine.Run，并加上分片、租约、失联次数与已保存的活动结果列。
+// 内嵌语义模型 engine.Run，并加上租约、失联次数与已保存的活动结果列。
 //
 // DurableRun is the durable table row for tb_graph_run, embedding engine.Run with scheduling columns.
 type DurableRun struct {
 	engine.Run `gorm:"embedded"`
-	// Shard 是 worker 轮询领取的分片，用于降低锁冲突；插入时由 durable 确定，之后不变。
-	// 同一 Task 的 Run 在同一分片；根 Task 按 TaskID 计算，子 Task 沿用父 Task 的分片。
-	Shard int `gorm:"column:Shard"`
 	// LeaseUntil 是租约到期时刻（Unix 毫秒），只在 RUNNING 时非零；过期后由恢复扫描回收。
 	LeaseUntil int64 `gorm:"column:LeaseUntil"`
 	// LeaseToken 每次领取加 1，只由领取修改；续租与写回都要求令牌一致，不一致说明租约已被收回，结果丢弃。
@@ -94,9 +90,8 @@ func (taskIndex) TableName() string { return "tb_graph_task" }
 
 type runIndex struct {
 	EngineKind  string           `gorm:"column:EngineKind;size:32;index:IdxRunClaim,priority:1;index:IdxRunLease,priority:1"`
-	Shard       int              `gorm:"column:Shard;index:IdxRunClaim,priority:2"`
-	Status      graph.StatusCode `gorm:"column:Status;size:16;index:IdxRunClaim,priority:3;index:IdxRunLease,priority:2"`
-	AvailableAt int64            `gorm:"column:AvailableAt;index:IdxRunClaim,priority:4"`
+	Status      graph.StatusCode `gorm:"column:Status;size:16;index:IdxRunClaim,priority:2;index:IdxRunLease,priority:2"`
+	AvailableAt int64            `gorm:"column:AvailableAt;index:IdxRunClaim,priority:3"`
 	LeaseUntil  int64            `gorm:"column:LeaseUntil;index:IdxRunLease,priority:3"`
 }
 
@@ -149,13 +144,12 @@ func (a act) none() bool { return a.ev == nil && a.fail == nil }
 // decide 在事务内根据锁住的 Task 与它的全部 Run（RunID → DurableRun）决定动作。
 type decide func(t *engine.Task, runs map[string]*DurableRun) act
 
-// batch 汇总一个事务写入的内容，提交后用于通知、中断本地执行、接力领取与跨 Task 投递。
+// batch 汇总一个事务写入的内容，提交后用于通知、中断本地执行、唤醒 worker 与跨 Task 投递。
 type batch struct {
 	head  *engine.Task     // 事务目标 Task 写回后的状态（无改动时为读取时的状态），用于回执
 	tasks []string         // 写入过的 TaskID（含同一事务内发起的子 Task）
 	runs  []DurableRun     // 写入过的 Run 行（含租约令牌）
 	after []kernel.Command // 提交后投递的 NotifyParent / CancelChild
-	fresh []string         // 本事务新插入并记入 byTask 的 TaskID；事务失败时从 byTask 删除（这些 Task 未写入）
 	fails []error          // 写入 kernel.Fail 结果的原因；提交后才上报 Observer，回滚重做时随 batch 丢弃，不重复上报
 	// graphs 是本次写回已加载的子图（GraphID → 加载结果），作为 kernel.Env.Graphs 传给 Apply。
 	// 同一次 txn 的各次重做共用它：已加载的子图不重复加载。
@@ -165,19 +159,16 @@ type batch struct {
 // txn 在事务内执行 fn；遇到 errStale 或可重试的数据库冲突时回滚并重做，每次重做使用新的 batch。
 // Apply 报告缺少子图（Changes.NeedGraphs，由 applyIn 包装为 *kernel.NeedGraph 触发回滚）时同样回滚，
 // 在事务之外用 engine.LoadGraphs 加载后重做；加载不计入冲突重试次数，每次至少加载一个新的子图，因此重做次数有界。
-// 数据库访问不随 ctx 中途打断（已开始的事务总是执行完）；ctx 用于重试之间的等待与子图加载。
 func (e *Engine) txn(ctx context.Context, fn func(tx *gorm.DB, b *batch) error) (*batch, error) {
 	graphs := map[string]kernel.LoadedGraph{}
 	for attempt := 1; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		b := &batch{graphs: graphs}
-		err := e.cfg.DB.WithContext(context.WithoutCancel(ctx)).Transaction(func(tx *gorm.DB) error { return fn(tx, b) })
+		err := e.cfg.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error { return fn(tx, b) })
 		if err == nil {
 			return b, nil
-		}
-		// 回滚后这些 Task 不存在（重做时子 Task 会生成新的 TaskID），不撤销会留下无人推进的条目。
-		// Rolled-back inserts never exist; drop their byTask entries.
-		for _, id := range b.fresh {
-			e.byTask.Delete(id)
 		}
 		if ids, ok := kernel.AsNeedGraph(err); ok {
 			if err := engine.LoadGraphs(ctx, e.cfg.ResolveGraph, ids, graphs); err != nil {
@@ -218,17 +209,7 @@ func (e *Engine) event(ctx context.Context, taskID string, d decide) (*batch, er
 		if a.none() {
 			return nil
 		}
-		c, err := e.compiled(tx, t)
-		if err != nil {
-			return err
-		}
-		// 已有 Task 的 Run 都在同一分片（新建 Run 写入所属 Task 的分片），取任一行即可；
-		// 已存在的 Task 至少有根 Run（Start 在插入 Task 的同一事务内建立），没有 Run 时按 TaskID 计算。
-		shard := e.shardOf(taskID)
-		if len(rows) > 0 {
-			shard = rows[0].Shard
-		}
-		_, err = e.applyIn(tx, c, t, rows, a, false, shard, b)
+		_, err = e.applyIn(tx, t, rows, a, false, b)
 		return err
 	})
 }
@@ -269,10 +250,10 @@ func loadAwaiting(db *gorm.DB, taskID string, runs []*engine.Run) (map[string]ma
 	return out, nil
 }
 
-// lockTask 加行锁读取 Task（不含图快照列）；SQLite 由单写事务（_txlock=immediate）保证串行。
+// lockTask 加行锁读取 Task；SQLite 由单写事务（_txlock=immediate）保证串行。
 func lockTask(tx *gorm.DB, taskID string) (*engine.Task, error) {
 	var t engine.Task
-	err := engine.Locking(tx).Omit("Graph").Where(map[string]any{"TaskID": taskID}).Take(&t).Error
+	err := engine.Locking(tx).Where(map[string]any{"TaskID": taskID}).Take(&t).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, engine.NotFoundTask(taskID)
 	}
@@ -285,36 +266,12 @@ func lockTask(tx *gorm.DB, taskID string) (*engine.Task, error) {
 	return &t, nil
 }
 
-// compiled 返回 Task 的编译结果：按 TaskID 命中 byTask 时不读取图快照列；
-// 未命中时用 tx 读取图快照并编译（内容相同的图共享 cache 中的同一份结果），Task 未结束时记入 byTask。
-//
-// compiled returns the task's compiled graph, reading the graph snapshot only on a byTask miss.
-func (e *Engine) compiled(tx *gorm.DB, t *engine.Task) (*kernel.Compiled, error) {
-	if c, ok := e.byTask.Load(t.TaskID); ok {
-		return c.(*kernel.Compiled), nil
-	}
-	full, err := engine.LoadTask(tx, t.TaskID, true)
-	if err != nil {
-		return nil, err
-	}
-	c, err := e.cache.Compile(full.Graph)
-	if err != nil {
-		return nil, err
-	}
-	// 已结束的 Task 不再推进，不记入，避免留下无人清理的条目。
-	if !graph.IsTerminal(t.Status) {
-		e.byTask.Store(t.TaskID, c)
-	}
-	return c, nil
-}
-
 // applyIn 在事务内对 Task t 执行动作 a 并写回，返回写回后的 Task。
 // fresh 为 true 表示 t 尚未写入（Start 或 StartChild）：写回时插入 Task 行。
-// shard 是 t 所在的分片，写入本次新建的 Run；同一事务内发起的子 Task 沿用它。
 // Apply 返回内核缺陷类错误时改为写入 kernel.Fail 的结果（设计文档 5.5），错误记入 b.fails、提交后上报；
 // 拒绝类错误原样返回；Changes.NeedGraphs 非空时返回 *kernel.NeedGraph，由 txn 回滚并在事务外加载子图后重做。
 // StartChild 在同一事务内递归处理；NotifyParent / CancelChild 记入 b.after，提交后投递。
-func (e *Engine) applyIn(tx *gorm.DB, c *kernel.Compiled, t *engine.Task, prev []DurableRun, a act, fresh bool, shard int, b *batch) (*engine.Task, error) {
+func (e *Engine) applyIn(tx *gorm.DB, t *engine.Task, prev []DurableRun, a act, fresh bool, b *batch) (*engine.Task, error) {
 	runs := make([]*engine.Run, len(prev))
 	for i := range prev {
 		runs[i] = &prev[i].Run
@@ -337,7 +294,7 @@ func (e *Engine) applyIn(tx *gorm.DB, c *kernel.Compiled, t *engine.Task, prev [
 		ch, cmds = kernel.Fail(t, runs, a.fail, env)
 	} else {
 		var err error
-		ch, cmds, err = kernel.Apply(c, t, runs, a.ev, env)
+		ch, cmds, err = kernel.Apply(e.cfg.Nodes, t, runs, a.ev, env)
 		if err != nil {
 			if kernel.IsRejection(err) {
 				return nil, err
@@ -352,17 +309,9 @@ func (e *Engine) applyIn(tx *gorm.DB, c *kernel.Compiled, t *engine.Task, prev [
 	if ch.Task != nil {
 		after = ch.Task
 	}
-	written, err := writeChanges(tx, prev, ch, after, fresh, shard)
+	written, err := e.writeChanges(tx, prev, ch, after, fresh)
 	if err != nil {
 		return nil, err
-	}
-	// 维护 byTask：新插入的 Task 直接记入 c，之后的写回不必读图快照；写入终态后删除。
-	// 事务回滚时：新插入的条目由 txn 按 b.fresh 删除；删除的条目不需要恢复，下次写回时重新读取。
-	if graph.IsTerminal(after.Status) {
-		e.byTask.Delete(after.TaskID)
-	} else if fresh {
-		e.byTask.Store(after.TaskID, c)
-		b.fresh = append(b.fresh, after.TaskID)
 	}
 	if b.head == nil || b.head.TaskID == after.TaskID {
 		b.head = after
@@ -374,7 +323,7 @@ func (e *Engine) applyIn(tx *gorm.DB, c *kernel.Compiled, t *engine.Task, prev [
 	for _, cmd := range cmds {
 		switch cmd := cmd.(type) {
 		case kernel.StartChild:
-			if _, err := e.applyIn(tx, cmd.Compiled, cmd.Task, nil, act{ev: kernel.Started{}}, true, shard, b); err != nil {
+			if _, err := e.applyIn(tx, cmd.Task, nil, act{ev: kernel.Started{}}, true, b); err != nil {
 				return nil, err
 			}
 		case kernel.NotifyParent, kernel.CancelChild:
@@ -384,14 +333,14 @@ func (e *Engine) applyIn(tx *gorm.DB, c *kernel.Compiled, t *engine.Task, prev [
 	return after, nil
 }
 
-// writeChanges 写回一次 Apply 的改动。prev 是事务内读取的 DurableRun（未出现在其中的 Run 是新建的，写入分片 shard 后插入）。
+// writeChanges 写回一次 Apply 的改动。prev 是事务内读取的 DurableRun（未出现在其中的 Run 是新建的，直接插入）。
 // 已有 Run 的更新以读取时的 Status、LeaseToken 为条件：未命中说明它在读取后被领取，返回 errStale 重做事务。
 // 不再处于 RUNNING 的 Run 清空租约到期时刻与未应用的结果（已应用，或已离开那次执行）；
 // LeaseToken 只由领取修改，这里原样写回。
 // Changes.Released 的子 Task 在同一事务内置 Awaited=false：之后不再计入等待视图，
 // 恢复扫描也不再为它补发 ChildDone；重复清除无副作用。
 // fresh 时插入 DurableTask 行（含图快照；子 Task 的 Awaited 为 true），否则按主键更新语义列（不改图快照与 Awaited）。
-func writeChanges(tx *gorm.DB, prev []DurableRun, ch kernel.Changes, t *engine.Task, fresh bool, shard int) ([]DurableRun, error) {
+func (e *Engine) writeChanges(tx *gorm.DB, prev []DurableRun, ch kernel.Changes, t *engine.Task, fresh bool) ([]DurableRun, error) {
 	old := make(map[string]DurableRun, len(prev))
 	for _, r := range prev {
 		old[r.RunID] = r
@@ -400,7 +349,7 @@ func writeChanges(tx *gorm.DB, prev []DurableRun, ch kernel.Changes, t *engine.T
 	for _, r := range ch.Runs {
 		o, ok := old[r.RunID]
 		if !ok {
-			row := DurableRun{Run: *r, Shard: shard}
+			row := DurableRun{Run: *r}
 			if err := tx.Create(&row).Error; err != nil {
 				return nil, err
 			}
@@ -409,7 +358,6 @@ func writeChanges(tx *gorm.DB, prev []DurableRun, ch kernel.Changes, t *engine.T
 		}
 		row := DurableRun{
 			Run:        *r,
-			Shard:      o.Shard,
 			LeaseUntil: o.LeaseUntil,
 			LeaseToken: o.LeaseToken,
 			LostCount:  o.LostCount,

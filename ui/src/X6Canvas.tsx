@@ -3,7 +3,7 @@ import { Graph, Selection, Transform, MiniMap, NodeView } from '@antv/x6'
 import { Maximize2, Minus, Plus } from 'lucide-react'
 import { GRAPH_DEFAULT_INPUT, GRAPH_DEFAULT_OUTPUT, type GraphUI } from './types'
 import type { GraphNodePack } from './node-pack'
-import { projectDocument, documentFromProjection, type GraphEditorNode, type GraphEditorEdge, type GraphViewState } from './document'
+import { applyGraphViewState, projectDocument, documentFromProjection, type GraphEditorNode, type GraphEditorEdge, type GraphViewState, type ProjectionNodeCacheEntry } from './document'
 import type { GraphCanvasConfig } from './entry-config'
 import { isGraphDarkMode } from './edge-style'
 import { connectDocument } from './canvas-edit'
@@ -128,21 +128,19 @@ export function X6Canvas({
   const initialMatrixRef = useRef(initialViewportMatrix)
   initialMatrixRef.current = initialViewportMatrix
   const [zoomLevel, setZoomLevel] = useState(100)
+  const projectionCacheRef = useRef<Map<string, ProjectionNodeCacheEntry>>(new Map())
 
-  // 将图结构投影（含 structuredClone）与视图叠加态（selected / runStatus）解耦：
-  // 选中节点或收到运行态推送时直接复用 baseProjected，避免对 1000+ 节点重复深拷贝与重算容器尺寸。
-  const baseProjected = useMemo(() => projectDocument(doc), [doc])
-  const projected = useMemo(() => {
-    if (!view.nodes && !view.edges) return baseProjected
-    return {
-      nodes: view.nodes
-        ? baseProjected.nodes.map((n) => (view.nodes?.[n.id] ? { ...n, ...view.nodes[n.id] } : n))
-        : baseProjected.nodes,
-      edges: view.edges
-        ? baseProjected.edges.map((e) => (view.edges?.[e.id] ? { ...e, ...view.edges[e.id] } : e))
-        : baseProjected.edges,
-    }
-  }, [baseProjected, view])
+  // 将图结构投影（含 structuredClone）与视图叠加态（selected / runStatus）解耦，且在节点原始 Inputs 未变时复用 config / inputs 引用：
+  // 选中节点、拖拽移动节点或收到运行态推送时避免对 1000+ 未改动节点重复深拷贝。
+  const baseProjected = useMemo(
+    () => projectDocument(doc, {}, projectionCacheRef.current),
+    [doc],
+  )
+  // 视图状态的合并规则与 useGraphDocument、React Flow 画布共用 applyGraphViewState。
+  const projected = useMemo(
+    () => applyGraphViewState(baseProjected, view),
+    [baseProjected, view],
+  )
   const { nodes, edges } = projected
 
   // 展开容器的尺寸包住循环体节点；随子节点移动重新计算
@@ -152,7 +150,7 @@ export function X6Canvas({
     [baseProjected.nodes, nodePack.registry],
   )
 
-  const callbacks = { doc, nodePack, view, interaction, onChange, onViewChange, onBeforeEdit, onNodeClick, onNodeDoubleClick, onEdgeClick, onPaneClick, onToggleBody, nodes, edges }
+  const callbacks = { doc, nodePack, view, interaction, onChange, onViewChange, onBeforeEdit, onNodeClick, onNodeDoubleClick, onEdgeClick, onPaneClick, onToggleBody, baseProjected, nodes, edges }
   const callbacksRef = useRef(callbacks)
   callbacksRef.current = callbacks
 
@@ -242,7 +240,7 @@ export function X6Canvas({
         position: graph.getCellById(n.id)?.isNode() ? graph.getCellById(n.id)!.getBBox().topLeft.toJSON() : n.position,
       }))
       if (next.some((n, i) => n.position.x !== c.nodes[i].position.x || n.position.y !== c.nodes[i].position.y)) {
-        c.onChange?.(documentFromProjection(next, c.edges, c.doc))
+        c.onChange?.(documentFromProjection(next, c.edges, c.doc, c.baseProjected))
       }
       selectionDragging = false
       nodeDragging = false
@@ -251,7 +249,7 @@ export function X6Canvas({
     graph.on('node:resize', () => callbacksRef.current.onBeforeEdit?.())
     graph.on('node:resized', ({node}) => {
       const c = callbacksRef.current, size = node.size(), position = node.position()
-      c.onChange?.(documentFromProjection(c.nodes.map((n) => n.id === node.id ? {...n, position, width: size.width, height: size.height} : n), c.edges, c.doc))
+      c.onChange?.(documentFromProjection(c.nodes.map((n) => n.id === node.id ? {...n, position, width: size.width, height: size.height} : n), c.edges, c.doc, c.baseProjected))
     })
 
     const emitNodeDblclick = (node: { id: string }, e: unknown) => {
@@ -282,7 +280,7 @@ export function X6Canvas({
       if (isUpdatingFromProps.current || selectionDragging || !wasNodeDragging) return
       const c = callbacksRef.current
       const next = c.nodes.map((n) => ({...n, position: graph.getCellById(n.id)?.isNode() ? graph.getCellById(n.id)!.getBBox().topLeft.toJSON() : n.position}))
-      c.onChange?.(documentFromProjection(next, c.edges, c.doc))
+      c.onChange?.(documentFromProjection(next, c.edges, c.doc, c.baseProjected))
       if (groupDragging) c.interaction.onSelectionDragStop?.(); else c.interaction.onNodeDragStop?.()
     })
     graph.on('node:contextmenu', ({ node, e }) => {
@@ -315,7 +313,7 @@ export function X6Canvas({
       if (!selected.nodes.length && !selected.edges.length) return
       const nodeIds = new Set(selected.nodes.map((n) => n.id)), edgeIds = new Set(selected.edges.map((ed) => ed.id))
       c.onBeforeEdit?.()
-      c.onChange?.(documentFromProjection(c.nodes.filter((n) => !nodeIds.has(n.id)), c.edges.filter((ed) => !edgeIds.has(ed.id)), c.doc))
+      c.onChange?.(documentFromProjection(c.nodes.filter((n) => !nodeIds.has(n.id)), c.edges.filter((ed) => !edgeIds.has(ed.id)), c.doc, c.baseProjected))
     }
     host.tabIndex = 0
     const onFocus = () => host.focus({preventScroll: true})
@@ -426,7 +424,7 @@ export function X6Canvas({
             graph.addNode(metadata)
             continue
           }
-          const previous = existing.getData<GraphEditorNode & { registry?: unknown; bodyToggle?: boolean }>()
+          const previous = existing.getData<GraphEditorNode & { registry?: unknown; bodyToggle?: boolean; rawEndpointSides?: Record<string, string> }>()
           const targetSize = containerSizes.get(n.id) ?? editorNodeSize(n, nodePack.registry)
           const wantW = n.type === 'annotation' ? Number(n.width ?? targetSize.w) : targetSize.w
           const wantH = n.type === 'annotation' ? Number(n.height ?? targetSize.h) : targetSize.h
@@ -440,8 +438,8 @@ export function X6Canvas({
           })
           const sidesUnchanged =
             previous !== undefined &&
-            n.endpointSides !== undefined &&
-            sameEndpointSidesMap(previous.endpointSides, n.endpointSides)
+            !payloadChanged &&
+            sameEndpointSidesMap(previous.rawEndpointSides, n.endpointSides)
 
           // 快速路径：节点几何、配置与端点方位均未变化（仅选中态、断点/注入或运行态更新）时，跳过 editorNodeToX6 与 JSON.stringify
           if (!posChanged && !sizeChanged && !payloadChanged && sidesUnchanged) {

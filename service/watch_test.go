@@ -1,6 +1,7 @@
 package service
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/golang-io/graph"
@@ -39,6 +40,32 @@ func TestDiffSnapshotDelta(t *testing.T) {
 	got := ApplyWatch(&prev, ev)
 	if len(got.Task.Graph.Nodes) != 1 || got.Task.Version != 2 || len(got.Runs) != 3 || got.Runs[1].Status != graph.RUNNING {
 		t.Fatalf("applied task=%+v runs=%d", got.Task, len(got.Runs))
+	}
+}
+
+func TestDiffSnapshotDeltaPreservesSource(t *testing.T) {
+	next := engine.TaskSnapshot{Task: engine.Task{
+		TaskID: "t1", Version: 2, Graph: testGraph(),
+		Input:  map[string]any{"obj": map[string]any{"x": int64(1)}},
+		Output: map[string]any{"items": []any{int64(2)}},
+		Policy: engine.TaskPolicy{Debug: &engine.DebugOptions{
+			Breakpoints: []string{"a"},
+			Injects: map[string]engine.DebugInject{
+				"a": {Vars: map[string]any{"items": []any{int64(3)}}},
+			},
+		}},
+	}}
+	before := next.Task.Clone()
+	ev := DiffSnapshot(engine.TaskSnapshot{Task: engine.Task{TaskID: "t1", Version: 1}}, next)
+	if ev.Task == nil || len(ev.Task.Graph.Nodes) != 0 {
+		t.Fatalf("delta must contain task without graph: %+v", ev.Task)
+	}
+	ev.Task.Input["obj"].(map[string]any)["x"] = int64(10)
+	ev.Task.Output["items"].([]any)[0] = int64(20)
+	ev.Task.Policy.Debug.Breakpoints[0] = "changed"
+	ev.Task.Policy.Debug.Injects["a"].Vars["items"].([]any)[0] = int64(30)
+	if !reflect.DeepEqual(&next.Task, before) {
+		t.Fatalf("delta modified source snapshot: got %+v, want %+v", next.Task, before)
 	}
 }
 

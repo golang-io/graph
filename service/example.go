@@ -66,8 +66,8 @@ func readDefinition(id string) (Definition, error) {
 	return g, nil
 }
 
-// ExampleGraph 读取 graph/example 全部样例，经 Save 幂等写入定义库。
-// 业务应用按需调用；默认启动不写入。
+// ExampleGraph 读取 graph/example 全部样例，先物理清空同 GraphID 的全部历史版本，再 Save 写入最新内容。
+// demo 启动即与仓库内 JSON 对齐；不做「内容相同则跳过」的兼容保留。
 func ExampleGraph(ctx context.Context, s *Store) error {
 	ids, err := ExampleIDs()
 	if err != nil {
@@ -78,8 +78,9 @@ func ExampleGraph(ctx context.Context, s *Store) error {
 		if err != nil {
 			return err
 		}
-		if err := g.Graph.Validate(); err != nil {
-			return fmt.Errorf("graph/service: validate example %s: %w", id, err)
+		// 删光该样例全部版本行，再写入（Save 内部执行完整 ValidateLayout 校验），避免旧历史版本残留。
+		if err := s.db.WithContext(ctx).Where(map[string]any{"GraphID": id}).Delete(&Definition{}).Error; err != nil {
+			return fmt.Errorf("graph/service: reset example %s: %w", id, err)
 		}
 		if _, err := s.Save(ctx, g); err != nil {
 			return fmt.Errorf("graph/service: example %s: %w", id, err)

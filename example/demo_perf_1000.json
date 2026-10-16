@@ -8,12 +8,39 @@
       "type": "object",
       "properties": {
         "items": {
+          "type": [
+            "string",
+            "integer",
+            "number",
+            "boolean",
+            "object",
+            "array",
+            "null"
+          ],
           "description": "Map 遍历列表（可选，默认 [1, 2, 3, 4]）"
         },
         "mode": {
+          "type": [
+            "string",
+            "integer",
+            "number",
+            "boolean",
+            "object",
+            "array",
+            "null"
+          ],
           "description": "运行模式标识（可选，默认 \"perf\"）"
         },
         "seed": {
+          "type": [
+            "string",
+            "integer",
+            "number",
+            "boolean",
+            "object",
+            "array",
+            "null"
+          ],
           "description": "起始数值（可选，默认 1）"
         }
       },
@@ -820,24 +847,33 @@
       },
       {
         "ID": "s01_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S01·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s01_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s01_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s01_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s01_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -976,8 +1012,20 @@
                   "Index": {
                     "type": "integer"
                   },
-                  "Item": true,
-                  "base": true
+                  "Item": {
+                    "type": [
+                      "string",
+                      "integer",
+                      "number",
+                      "boolean",
+                      "object",
+                      "array",
+                      "null"
+                    ]
+                  },
+                  "base": {
+                    "type": "number"
+                  }
                 },
                 "required": [
                   "Item",
@@ -1139,7 +1187,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (rv \u003e= 0 ? 0 : 0)"
+                "Value": "bv + (rv >= 0 ? 0 : 0)"
               }
             ]
           },
@@ -1913,24 +1961,33 @@
       },
       {
         "ID": "s02_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S02·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s02_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s02_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s02_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s02_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -2069,11 +2126,16 @@
       },
       {
         "ID": "s02_err",
-        "Kind": "__INNER__.stop_error",
+        "Kind": "template",
         "Name": "S02·错误探测",
         "Inputs": {
-          "Message": {
-            "Value": "stage-02:{{tag}}"
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "err",
+                "Value": "stage-02:{{tag}}"
+              }
+            ]
           },
           "tag": {
             "From": "s02_sw_join",
@@ -2096,7 +2158,7 @@
           },
           "err": {
             "From": "s02_err",
-            "Field": "Error"
+            "Field": "err"
           }
         }
       },
@@ -2109,7 +2171,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (len(recovered) \u003e 0 ? 0 : 0)"
+                "Value": "bv + (len(recovered) > 0 ? 0 : 0)"
               }
             ]
           },
@@ -2883,24 +2945,33 @@
       },
       {
         "ID": "s03_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S03·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s03_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s03_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s03_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s03_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -3028,11 +3099,16 @@
       },
       {
         "ID": "s03_err",
-        "Kind": "__INNER__.stop_error",
+        "Kind": "template",
         "Name": "S03·错误探测",
         "Inputs": {
-          "Message": {
-            "Value": "stage-03:{{tag}}"
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "err",
+                "Value": "stage-03:{{tag}}"
+              }
+            ]
           },
           "tag": {
             "From": "s03_sw_join",
@@ -3055,7 +3131,7 @@
           },
           "err": {
             "From": "s03_err",
-            "Field": "Error"
+            "Field": "err"
           }
         }
       },
@@ -3068,7 +3144,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (len(recovered) \u003e 0 ? 0 : 0)"
+                "Value": "bv + (len(recovered) > 0 ? 0 : 0)"
               }
             ]
           },
@@ -3842,24 +3918,33 @@
       },
       {
         "ID": "s04_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S04·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s04_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s04_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s04_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s04_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -3998,11 +4083,16 @@
       },
       {
         "ID": "s04_err",
-        "Kind": "__INNER__.stop_error",
+        "Kind": "template",
         "Name": "S04·错误探测",
         "Inputs": {
-          "Message": {
-            "Value": "stage-04:{{tag}}"
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "err",
+                "Value": "stage-04:{{tag}}"
+              }
+            ]
           },
           "tag": {
             "From": "s04_sw_join",
@@ -4025,7 +4115,7 @@
           },
           "err": {
             "From": "s04_err",
-            "Field": "Error"
+            "Field": "err"
           }
         }
       },
@@ -4038,7 +4128,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (len(recovered) \u003e 0 ? 0 : 0)"
+                "Value": "bv + (len(recovered) > 0 ? 0 : 0)"
               }
             ]
           },
@@ -4812,24 +4902,33 @@
       },
       {
         "ID": "s05_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S05·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s05_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s05_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s05_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s05_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -4968,8 +5067,20 @@
                   "Index": {
                     "type": "integer"
                   },
-                  "Item": true,
-                  "base": true
+                  "Item": {
+                    "type": [
+                      "string",
+                      "integer",
+                      "number",
+                      "boolean",
+                      "object",
+                      "array",
+                      "null"
+                    ]
+                  },
+                  "base": {
+                    "type": "number"
+                  }
                 },
                 "required": [
                   "Item",
@@ -5131,7 +5242,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (rv \u003e= 0 ? 0 : 0)"
+                "Value": "bv + (rv >= 0 ? 0 : 0)"
               }
             ]
           },
@@ -5905,24 +6016,33 @@
       },
       {
         "ID": "s06_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S06·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s06_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s06_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s06_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s06_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -6061,11 +6181,16 @@
       },
       {
         "ID": "s06_err",
-        "Kind": "__INNER__.stop_error",
+        "Kind": "template",
         "Name": "S06·错误探测",
         "Inputs": {
-          "Message": {
-            "Value": "stage-06:{{tag}}"
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "err",
+                "Value": "stage-06:{{tag}}"
+              }
+            ]
           },
           "tag": {
             "From": "s06_sw_join",
@@ -6088,7 +6213,7 @@
           },
           "err": {
             "From": "s06_err",
-            "Field": "Error"
+            "Field": "err"
           }
         }
       },
@@ -6101,7 +6226,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (len(recovered) \u003e 0 ? 0 : 0)"
+                "Value": "bv + (len(recovered) > 0 ? 0 : 0)"
               }
             ]
           },
@@ -6875,24 +7000,33 @@
       },
       {
         "ID": "s07_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S07·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s07_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s07_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s07_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s07_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -7020,11 +7154,16 @@
       },
       {
         "ID": "s07_err",
-        "Kind": "__INNER__.stop_error",
+        "Kind": "template",
         "Name": "S07·错误探测",
         "Inputs": {
-          "Message": {
-            "Value": "stage-07:{{tag}}"
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "err",
+                "Value": "stage-07:{{tag}}"
+              }
+            ]
           },
           "tag": {
             "From": "s07_sw_join",
@@ -7047,7 +7186,7 @@
           },
           "err": {
             "From": "s07_err",
-            "Field": "Error"
+            "Field": "err"
           }
         }
       },
@@ -7060,7 +7199,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (len(recovered) \u003e 0 ? 0 : 0)"
+                "Value": "bv + (len(recovered) > 0 ? 0 : 0)"
               }
             ]
           },
@@ -7834,24 +7973,33 @@
       },
       {
         "ID": "s08_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S08·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s08_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s08_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s08_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s08_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -7990,11 +8138,16 @@
       },
       {
         "ID": "s08_err",
-        "Kind": "__INNER__.stop_error",
+        "Kind": "template",
         "Name": "S08·错误探测",
         "Inputs": {
-          "Message": {
-            "Value": "stage-08:{{tag}}"
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "err",
+                "Value": "stage-08:{{tag}}"
+              }
+            ]
           },
           "tag": {
             "From": "s08_sw_join",
@@ -8017,7 +8170,7 @@
           },
           "err": {
             "From": "s08_err",
-            "Field": "Error"
+            "Field": "err"
           }
         }
       },
@@ -8030,7 +8183,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (len(recovered) \u003e 0 ? 0 : 0)"
+                "Value": "bv + (len(recovered) > 0 ? 0 : 0)"
               }
             ]
           },
@@ -8804,24 +8957,33 @@
       },
       {
         "ID": "s09_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S09·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s09_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s09_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s09_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s09_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -8960,8 +9122,20 @@
                   "Index": {
                     "type": "integer"
                   },
-                  "Item": true,
-                  "base": true
+                  "Item": {
+                    "type": [
+                      "string",
+                      "integer",
+                      "number",
+                      "boolean",
+                      "object",
+                      "array",
+                      "null"
+                    ]
+                  },
+                  "base": {
+                    "type": "number"
+                  }
                 },
                 "required": [
                   "Item",
@@ -9123,7 +9297,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (rv \u003e= 0 ? 0 : 0)"
+                "Value": "bv + (rv >= 0 ? 0 : 0)"
               }
             ]
           },
@@ -9897,24 +10071,33 @@
       },
       {
         "ID": "s10_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S10·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s10_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s10_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s10_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s10_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -10053,11 +10236,16 @@
       },
       {
         "ID": "s10_err",
-        "Kind": "__INNER__.stop_error",
+        "Kind": "template",
         "Name": "S10·错误探测",
         "Inputs": {
-          "Message": {
-            "Value": "stage-10:{{tag}}"
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "err",
+                "Value": "stage-10:{{tag}}"
+              }
+            ]
           },
           "tag": {
             "From": "s10_sw_join",
@@ -10080,7 +10268,7 @@
           },
           "err": {
             "From": "s10_err",
-            "Field": "Error"
+            "Field": "err"
           }
         }
       },
@@ -10093,7 +10281,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (len(recovered) \u003e 0 ? 0 : 0)"
+                "Value": "bv + (len(recovered) > 0 ? 0 : 0)"
               }
             ]
           },
@@ -10867,24 +11055,33 @@
       },
       {
         "ID": "s11_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S11·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s11_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s11_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s11_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s11_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -11012,11 +11209,16 @@
       },
       {
         "ID": "s11_err",
-        "Kind": "__INNER__.stop_error",
+        "Kind": "template",
         "Name": "S11·错误探测",
         "Inputs": {
-          "Message": {
-            "Value": "stage-11:{{tag}}"
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "err",
+                "Value": "stage-11:{{tag}}"
+              }
+            ]
           },
           "tag": {
             "From": "s11_sw_join",
@@ -11039,7 +11241,7 @@
           },
           "err": {
             "From": "s11_err",
-            "Field": "Error"
+            "Field": "err"
           }
         }
       },
@@ -11052,7 +11254,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (len(recovered) \u003e 0 ? 0 : 0)"
+                "Value": "bv + (len(recovered) > 0 ? 0 : 0)"
               }
             ]
           },
@@ -11826,24 +12028,33 @@
       },
       {
         "ID": "s12_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S12·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s12_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s12_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s12_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s12_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -11982,11 +12193,16 @@
       },
       {
         "ID": "s12_err",
-        "Kind": "__INNER__.stop_error",
+        "Kind": "template",
         "Name": "S12·错误探测",
         "Inputs": {
-          "Message": {
-            "Value": "stage-12:{{tag}}"
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "err",
+                "Value": "stage-12:{{tag}}"
+              }
+            ]
           },
           "tag": {
             "From": "s12_sw_join",
@@ -12009,7 +12225,7 @@
           },
           "err": {
             "From": "s12_err",
-            "Field": "Error"
+            "Field": "err"
           }
         }
       },
@@ -12022,7 +12238,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (len(recovered) \u003e 0 ? 0 : 0)"
+                "Value": "bv + (len(recovered) > 0 ? 0 : 0)"
               }
             ]
           },
@@ -12796,24 +13012,33 @@
       },
       {
         "ID": "s13_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S13·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s13_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s13_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s13_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s13_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -12952,8 +13177,20 @@
                   "Index": {
                     "type": "integer"
                   },
-                  "Item": true,
-                  "base": true
+                  "Item": {
+                    "type": [
+                      "string",
+                      "integer",
+                      "number",
+                      "boolean",
+                      "object",
+                      "array",
+                      "null"
+                    ]
+                  },
+                  "base": {
+                    "type": "number"
+                  }
                 },
                 "required": [
                   "Item",
@@ -13115,7 +13352,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (rv \u003e= 0 ? 0 : 0)"
+                "Value": "bv + (rv >= 0 ? 0 : 0)"
               }
             ]
           },
@@ -13889,24 +14126,33 @@
       },
       {
         "ID": "s14_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S14·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s14_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s14_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s14_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s14_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -14045,11 +14291,16 @@
       },
       {
         "ID": "s14_err",
-        "Kind": "__INNER__.stop_error",
+        "Kind": "template",
         "Name": "S14·错误探测",
         "Inputs": {
-          "Message": {
-            "Value": "stage-14:{{tag}}"
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "err",
+                "Value": "stage-14:{{tag}}"
+              }
+            ]
           },
           "tag": {
             "From": "s14_sw_join",
@@ -14072,7 +14323,7 @@
           },
           "err": {
             "From": "s14_err",
-            "Field": "Error"
+            "Field": "err"
           }
         }
       },
@@ -14085,7 +14336,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (len(recovered) \u003e 0 ? 0 : 0)"
+                "Value": "bv + (len(recovered) > 0 ? 0 : 0)"
               }
             ]
           },
@@ -14859,24 +15110,33 @@
       },
       {
         "ID": "s15_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S15·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s15_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s15_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s15_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s15_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -15004,11 +15264,16 @@
       },
       {
         "ID": "s15_err",
-        "Kind": "__INNER__.stop_error",
+        "Kind": "template",
         "Name": "S15·错误探测",
         "Inputs": {
-          "Message": {
-            "Value": "stage-15:{{tag}}"
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "err",
+                "Value": "stage-15:{{tag}}"
+              }
+            ]
           },
           "tag": {
             "From": "s15_sw_join",
@@ -15031,7 +15296,7 @@
           },
           "err": {
             "From": "s15_err",
-            "Field": "Error"
+            "Field": "err"
           }
         }
       },
@@ -15044,7 +15309,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (len(recovered) \u003e 0 ? 0 : 0)"
+                "Value": "bv + (len(recovered) > 0 ? 0 : 0)"
               }
             ]
           },
@@ -15818,24 +16083,33 @@
       },
       {
         "ID": "s16_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S16·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s16_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s16_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s16_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s16_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -15974,11 +16248,16 @@
       },
       {
         "ID": "s16_err",
-        "Kind": "__INNER__.stop_error",
+        "Kind": "template",
         "Name": "S16·错误探测",
         "Inputs": {
-          "Message": {
-            "Value": "stage-16:{{tag}}"
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "err",
+                "Value": "stage-16:{{tag}}"
+              }
+            ]
           },
           "tag": {
             "From": "s16_sw_join",
@@ -16001,7 +16280,7 @@
           },
           "err": {
             "From": "s16_err",
-            "Field": "Error"
+            "Field": "err"
           }
         }
       },
@@ -16014,7 +16293,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (len(recovered) \u003e 0 ? 0 : 0)"
+                "Value": "bv + (len(recovered) > 0 ? 0 : 0)"
               }
             ]
           },
@@ -16788,24 +17067,33 @@
       },
       {
         "ID": "s17_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S17·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s17_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s17_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s17_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s17_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -16944,8 +17232,20 @@
                   "Index": {
                     "type": "integer"
                   },
-                  "Item": true,
-                  "base": true
+                  "Item": {
+                    "type": [
+                      "string",
+                      "integer",
+                      "number",
+                      "boolean",
+                      "object",
+                      "array",
+                      "null"
+                    ]
+                  },
+                  "base": {
+                    "type": "number"
+                  }
                 },
                 "required": [
                   "Item",
@@ -17107,7 +17407,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (rv \u003e= 0 ? 0 : 0)"
+                "Value": "bv + (rv >= 0 ? 0 : 0)"
               }
             ]
           },
@@ -17881,24 +18181,33 @@
       },
       {
         "ID": "s18_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S18·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s18_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s18_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s18_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s18_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -18037,11 +18346,16 @@
       },
       {
         "ID": "s18_err",
-        "Kind": "__INNER__.stop_error",
+        "Kind": "template",
         "Name": "S18·错误探测",
         "Inputs": {
-          "Message": {
-            "Value": "stage-18:{{tag}}"
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "err",
+                "Value": "stage-18:{{tag}}"
+              }
+            ]
           },
           "tag": {
             "From": "s18_sw_join",
@@ -18064,7 +18378,7 @@
           },
           "err": {
             "From": "s18_err",
-            "Field": "Error"
+            "Field": "err"
           }
         }
       },
@@ -18077,7 +18391,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (len(recovered) \u003e 0 ? 0 : 0)"
+                "Value": "bv + (len(recovered) > 0 ? 0 : 0)"
               }
             ]
           },
@@ -18851,24 +19165,33 @@
       },
       {
         "ID": "s19_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S19·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s19_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s19_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s19_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s19_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -18996,11 +19319,16 @@
       },
       {
         "ID": "s19_err",
-        "Kind": "__INNER__.stop_error",
+        "Kind": "template",
         "Name": "S19·错误探测",
         "Inputs": {
-          "Message": {
-            "Value": "stage-19:{{tag}}"
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "err",
+                "Value": "stage-19:{{tag}}"
+              }
+            ]
           },
           "tag": {
             "From": "s19_sw_join",
@@ -19023,7 +19351,7 @@
           },
           "err": {
             "From": "s19_err",
-            "Field": "Error"
+            "Field": "err"
           }
         }
       },
@@ -19036,7 +19364,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (len(recovered) \u003e 0 ? 0 : 0)"
+                "Value": "bv + (len(recovered) > 0 ? 0 : 0)"
               }
             ]
           },
@@ -19810,24 +20138,33 @@
       },
       {
         "ID": "s20_ijoin",
-        "Kind": "template",
+        "Kind": "__INNER__.merge",
         "Name": "S20·隐式汇聚",
         "Inputs": {
+          "Mode": {
+            "Value": "all"
+          },
           "Outputs": {
             "Value": [
               {
-                "Key": "pair",
-                "Value": "{{lt}}|{{rt}}"
+                "Name": "lt",
+                "First": [
+                  {
+                    "From": "s20_il_3",
+                    "Field": "txt"
+                  }
+                ]
+              },
+              {
+                "Name": "rt",
+                "First": [
+                  {
+                    "From": "s20_ir_3",
+                    "Field": "txt"
+                  }
+                ]
               }
             ]
-          },
-          "lt": {
-            "From": "s20_il_3",
-            "Field": "txt"
-          },
-          "rt": {
-            "From": "s20_ir_3",
-            "Field": "txt"
           }
         }
       },
@@ -19966,11 +20303,16 @@
       },
       {
         "ID": "s20_err",
-        "Kind": "__INNER__.stop_error",
+        "Kind": "template",
         "Name": "S20·错误探测",
         "Inputs": {
-          "Message": {
-            "Value": "stage-20:{{tag}}"
+          "Outputs": {
+            "Value": [
+              {
+                "Key": "err",
+                "Value": "stage-20:{{tag}}"
+              }
+            ]
           },
           "tag": {
             "From": "s20_sw_join",
@@ -19993,7 +20335,7 @@
           },
           "err": {
             "From": "s20_err",
-            "Field": "Error"
+            "Field": "err"
           }
         }
       },
@@ -20006,7 +20348,7 @@
             "Value": [
               {
                 "Key": "v",
-                "Value": "bv + (len(recovered) \u003e 0 ? 0 : 0)"
+                "Value": "bv + (len(recovered) > 0 ? 0 : 0)"
               }
             ]
           },
@@ -20033,8 +20375,20 @@
                   "Index": {
                     "type": "integer"
                   },
-                  "Item": true,
-                  "threshold": true
+                  "Item": {
+                    "type": [
+                      "string",
+                      "integer",
+                      "number",
+                      "boolean",
+                      "object",
+                      "array",
+                      "null"
+                    ]
+                  },
+                  "threshold": {
+                    "type": "number"
+                  }
                 },
                 "required": [
                   "Item",
@@ -20082,7 +20436,7 @@
                         {
                           "ID": "Case0",
                           "Label": "高值",
-                          "Expr": "val \u003e= 25"
+                          "Expr": "val >= 25"
                         },
                         {
                           "ID": "Case1",
@@ -20281,12 +20635,12 @@
               {
                 "ID": "Case0",
                 "Label": "高分",
-                "Expr": "v \u003e= 200"
+                "Expr": "v >= 200"
               },
               {
                 "ID": "Case1",
                 "Label": "中分",
-                "Expr": "v \u003e= 100"
+                "Expr": "v >= 100"
               },
               {
                 "ID": "Case2",
@@ -21154,7 +21508,7 @@
       },
       {
         "ID": "e_0108",
-        "From": "s02_err.Error",
+        "From": "s02_err.Out",
         "To": "s02_rec.In"
       },
       {
@@ -21424,7 +21778,7 @@
       },
       {
         "ID": "e_0162",
-        "From": "s03_err.Error",
+        "From": "s03_err.Out",
         "To": "s03_rec.In"
       },
       {
@@ -21694,7 +22048,7 @@
       },
       {
         "ID": "e_0216",
-        "From": "s04_err.Error",
+        "From": "s04_err.Out",
         "To": "s04_rec.In"
       },
       {
@@ -22234,7 +22588,7 @@
       },
       {
         "ID": "e_0324",
-        "From": "s06_err.Error",
+        "From": "s06_err.Out",
         "To": "s06_rec.In"
       },
       {
@@ -22504,7 +22858,7 @@
       },
       {
         "ID": "e_0378",
-        "From": "s07_err.Error",
+        "From": "s07_err.Out",
         "To": "s07_rec.In"
       },
       {
@@ -22774,7 +23128,7 @@
       },
       {
         "ID": "e_0432",
-        "From": "s08_err.Error",
+        "From": "s08_err.Out",
         "To": "s08_rec.In"
       },
       {
@@ -23314,7 +23668,7 @@
       },
       {
         "ID": "e_0540",
-        "From": "s10_err.Error",
+        "From": "s10_err.Out",
         "To": "s10_rec.In"
       },
       {
@@ -23584,7 +23938,7 @@
       },
       {
         "ID": "e_0594",
-        "From": "s11_err.Error",
+        "From": "s11_err.Out",
         "To": "s11_rec.In"
       },
       {
@@ -23854,7 +24208,7 @@
       },
       {
         "ID": "e_0648",
-        "From": "s12_err.Error",
+        "From": "s12_err.Out",
         "To": "s12_rec.In"
       },
       {
@@ -24394,7 +24748,7 @@
       },
       {
         "ID": "e_0756",
-        "From": "s14_err.Error",
+        "From": "s14_err.Out",
         "To": "s14_rec.In"
       },
       {
@@ -24664,7 +25018,7 @@
       },
       {
         "ID": "e_0810",
-        "From": "s15_err.Error",
+        "From": "s15_err.Out",
         "To": "s15_rec.In"
       },
       {
@@ -24934,7 +25288,7 @@
       },
       {
         "ID": "e_0864",
-        "From": "s16_err.Error",
+        "From": "s16_err.Out",
         "To": "s16_rec.In"
       },
       {
@@ -25474,7 +25828,7 @@
       },
       {
         "ID": "e_0972",
-        "From": "s18_err.Error",
+        "From": "s18_err.Out",
         "To": "s18_rec.In"
       },
       {
@@ -25744,7 +26098,7 @@
       },
       {
         "ID": "e_1026",
-        "From": "s19_err.Error",
+        "From": "s19_err.Out",
         "To": "s19_rec.In"
       },
       {
@@ -26014,7 +26368,7 @@
       },
       {
         "ID": "e_1080",
-        "From": "s20_err.Error",
+        "From": "s20_err.Out",
         "To": "s20_rec.In"
       },
       {
@@ -30403,8 +30757,8 @@
         "Out": "right"
       },
       "s02_err": {
-        "Error": "right",
-        "In": "left"
+        "In": "left",
+        "Out": "right"
       },
       "s02_ifork": {
         "In": "left",
@@ -30600,8 +30954,8 @@
         "Out": "right"
       },
       "s03_err": {
-        "Error": "right",
-        "In": "left"
+        "In": "left",
+        "Out": "right"
       },
       "s03_ifork": {
         "In": "left",
@@ -30797,8 +31151,8 @@
         "Out": "right"
       },
       "s04_err": {
-        "Error": "right",
-        "In": "left"
+        "In": "left",
+        "Out": "right"
       },
       "s04_ifork": {
         "In": "left",
@@ -31191,8 +31545,8 @@
         "Out": "right"
       },
       "s06_err": {
-        "Error": "right",
-        "In": "left"
+        "In": "left",
+        "Out": "right"
       },
       "s06_ifork": {
         "In": "left",
@@ -31388,8 +31742,8 @@
         "Out": "right"
       },
       "s07_err": {
-        "Error": "right",
-        "In": "left"
+        "In": "left",
+        "Out": "right"
       },
       "s07_ifork": {
         "In": "left",
@@ -31585,8 +31939,8 @@
         "Out": "right"
       },
       "s08_err": {
-        "Error": "right",
-        "In": "left"
+        "In": "left",
+        "Out": "right"
       },
       "s08_ifork": {
         "In": "left",
@@ -31979,8 +32333,8 @@
         "Out": "right"
       },
       "s10_err": {
-        "Error": "right",
-        "In": "left"
+        "In": "left",
+        "Out": "right"
       },
       "s10_ifork": {
         "In": "left",
@@ -32176,8 +32530,8 @@
         "Out": "right"
       },
       "s11_err": {
-        "Error": "right",
-        "In": "left"
+        "In": "left",
+        "Out": "right"
       },
       "s11_ifork": {
         "In": "left",
@@ -32373,8 +32727,8 @@
         "Out": "right"
       },
       "s12_err": {
-        "Error": "right",
-        "In": "left"
+        "In": "left",
+        "Out": "right"
       },
       "s12_ifork": {
         "In": "left",
@@ -32767,8 +33121,8 @@
         "Out": "right"
       },
       "s14_err": {
-        "Error": "right",
-        "In": "left"
+        "In": "left",
+        "Out": "right"
       },
       "s14_ifork": {
         "In": "left",
@@ -32964,8 +33318,8 @@
         "Out": "right"
       },
       "s15_err": {
-        "Error": "right",
-        "In": "left"
+        "In": "left",
+        "Out": "right"
       },
       "s15_ifork": {
         "In": "left",
@@ -33161,8 +33515,8 @@
         "Out": "right"
       },
       "s16_err": {
-        "Error": "right",
-        "In": "left"
+        "In": "left",
+        "Out": "right"
       },
       "s16_ifork": {
         "In": "left",
@@ -33555,8 +33909,8 @@
         "Out": "right"
       },
       "s18_err": {
-        "Error": "right",
-        "In": "left"
+        "In": "left",
+        "Out": "right"
       },
       "s18_ifork": {
         "In": "left",
@@ -33752,8 +34106,8 @@
         "Out": "right"
       },
       "s19_err": {
-        "Error": "right",
-        "In": "left"
+        "In": "left",
+        "Out": "right"
       },
       "s19_ifork": {
         "In": "left",
@@ -33949,8 +34303,8 @@
         "Out": "right"
       },
       "s20_err": {
-        "Error": "right",
-        "In": "left"
+        "In": "left",
+        "Out": "right"
       },
       "s20_ifork": {
         "In": "left",

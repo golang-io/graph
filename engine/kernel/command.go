@@ -29,14 +29,13 @@ func (c ExecuteActivity) Current(r *engine.Run) bool {
 }
 
 // StartChild 要求引擎创建子 Task 并对它应用 Started{}。Task 为 PENDING 状态，已填好父子关系、
-// 图快照与校验规整后的运行输入；Compiled 是子 Task 的编译结果，引擎可直接使用。
+// 图快照与校验规整后的运行输入。
 // 创建的同时引擎必须记下这条等待（durable 置子 Task 的 Awaited=true，immediate 记入内存等待关系），
 // 且与本次改动的保存原子、早于任何后续事件的 Apply：后到的 ChildDone 可能在子 Task 启动前到达，
 // 等待视图必须已包含新子 Task，否则内核会误判为“只返回 State 却无等待”。
 // durable 靠同一事务保证，immediate 靠处理循环内先登记、再启动的同步顺序保证。
 type StartChild struct {
-	Task     *engine.Task
-	Compiled *Compiled
+	Task *engine.Task
 }
 
 // CancelChild 要求引擎向子 Task 投递 Cancel{Reason: CancelChildReason}（父 Run 离开节点、Task 结束或取消时产生）。

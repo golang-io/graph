@@ -29,7 +29,7 @@
 
 | HTTP | Code | 场景 |
 | --- | --- | --- |
-| 400 | `Invalid` | 未知键（含已删除的 `Input`）、`DebugAction` 取值非法 |
+| 400 | `Invalid` | 未知键（含已删除的 `Input`）、`DebugAction` 取值非法、`Debug.Injects` 无法规整或不符合节点参数类型与校验规则 |
 | 400 | `Unsupported` | 引擎已关闭，或 durable 处于恢复模式 |
 | 404 | `NotFound` | Task 不存在（immediate 执行中的 Task 只能在执行它的进程内找到） |
 | 409 | `Conflict` | Task 未结束，但没有调试等待中的 Run 且未暂停（`DebugAction` 为空且提供了 `Debug` 时除外，此时只替换调试选项）；目标 Run 已不在等待 |

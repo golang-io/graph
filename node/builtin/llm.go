@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"strings"
 
 	"github.com/golang-io/graph"
@@ -43,17 +42,8 @@ type LLMInput struct {
 }
 
 func (c LLMInput) Validate() error {
-	// Model/Prompt 可为绑定引用；字面量为空时由 InputSchema.required 保证键存在。
 	if c.MaxTokens < 0 {
 		return fmt.Errorf("MaxTokens must be >= 0")
-	}
-	for _, text := range []string{c.Model, c.System, c.Prompt} {
-		if text == "" {
-			continue
-		}
-		if err := graph.ValidateTemplate(text); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -99,10 +89,9 @@ func (n LLMNode) Execute(ctx context.Context, in node.NodeInput) (node.NodeOutpu
 	if err != nil {
 		return node.NodeOutput{}, err
 	}
-	vars := maps.Clone(in.Vars)
-	cfg.Model = strings.TrimSpace(graph.RenderTemplate(cfg.Model, vars))
-	cfg.System = graph.RenderTemplate(cfg.System, vars)
-	cfg.Prompt = graph.RenderTemplate(cfg.Prompt, vars)
+	cfg.Model = strings.TrimSpace(graph.RenderTemplate(cfg.Model, in.Vars))
+	cfg.System = graph.RenderTemplate(cfg.System, in.Vars)
+	cfg.Prompt = graph.RenderTemplate(cfg.Prompt, in.Vars)
 	if cfg.Model == "" || strings.TrimSpace(cfg.Prompt) == "" {
 		return node.NodeOutput{}, fmt.Errorf("node: Model and Prompt required")
 	}
@@ -110,5 +99,5 @@ func (n LLMNode) Execute(ctx context.Context, in node.NodeInput) (node.NodeOutpu
 	if err != nil {
 		return node.NodeOutput{}, err
 	}
-	return node.Continue(node.OutputMap(LLMOutput{Text: text}), ""), nil
+	return node.Continue(map[string]any{LLMTextField: text}, ""), nil
 }

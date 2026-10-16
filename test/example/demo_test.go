@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/golang-io/graph"
@@ -210,8 +211,8 @@ func TestDemoP1ControlExecute(t *testing.T) {
 	}
 
 	failRes := execute(t, parent, map[string]any{"name": "Ada", "force_fail": 1}, "", resolve)
-	if failRes.Output["result"] != "recovered:forced fail for Ada" {
-		t.Fatalf("fail path: %#v", failRes.Output)
+	if failRes.Status != graph.FAILED || !strings.Contains(failRes.Error, "forced fail for Ada") {
+		t.Fatalf("fail path: status=%s err=%q", failRes.Status, failRes.Error)
 	}
 
 	okRes := execute(t, parent, map[string]any{"name": "Ada", "force_fail": 0}, "", resolve)
@@ -300,15 +301,15 @@ func TestLoadDemoImplicitFork(t *testing.T) {
 		t.Fatal("expected version")
 	}
 	fromFork := 0
-	intoJoin := 0
-	joinType := ""
+	intoMerge := 0
+	mergeType := ""
 	for _, n := range dto.Graph.Nodes {
-		if n.ID == "join" {
-			joinType = n.Kind
+		if n.ID == "merge" {
+			mergeType = n.Kind
 		}
 	}
-	if joinType != builtin.Template {
-		t.Fatalf("join type=%s want template", joinType)
+	if mergeType != builtin.Merge {
+		t.Fatalf("merge type=%s want %s", mergeType, builtin.Merge)
 	}
 	for _, e := range dto.Graph.Edges {
 		if e.FromNode() == "fork" {
@@ -318,15 +319,15 @@ func TestLoadDemoImplicitFork(t *testing.T) {
 				t.Fatalf("fork edge %s from=%q, want default output", e.ID, e.FromName())
 			}
 		}
-		if e.ToNode() == "join" {
-			intoJoin++
+		if e.ToNode() == "merge" {
+			intoMerge++
 		}
 	}
 	if fromFork != 2 {
 		t.Fatalf("fork outs=%d", fromFork)
 	}
-	if intoJoin != 2 {
-		t.Fatalf("join ins=%d", intoJoin)
+	if intoMerge != 2 {
+		t.Fatalf("merge ins=%d", intoMerge)
 	}
 	if err := service.ExampleGraph(context.Background(), st); err != nil {
 		t.Fatal(err)
@@ -400,7 +401,7 @@ func TestLoadDemoPerf1000(t *testing.T) {
 	}
 	for _, want := range []string{
 		builtin.Start, builtin.End, builtin.Template, builtin.Code,
-		builtin.Parallel, builtin.Merge, builtin.Switch, builtin.Map, builtin.Reduce, builtin.StopError,
+		builtin.Parallel, builtin.Merge, builtin.Switch, builtin.Map, builtin.Reduce,
 	} {
 		if types[want] == 0 {
 			t.Fatalf("missing node kind %s", want)

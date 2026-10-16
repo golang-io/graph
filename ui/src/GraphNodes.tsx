@@ -6,7 +6,7 @@
  */
 import { Handle, Position, useUpdateNodeInternals, type Node, type NodeProps } from '@xyflow/react'
 import { CirclePlay, CircleStop, GitBranch, GitFork, GitMerge, Maximize2, Minimize2, Repeat, Sparkles, type LucideIcon } from 'lucide-react'
-import { createContext, useContext, useEffect, type CSSProperties, type ReactNode } from 'react'
+import { createContext, memo, useContext, useEffect, useRef, type CSSProperties, type ReactNode } from 'react'
 import { cn } from './cn'
 import { runStatusBorderStyle } from './edge-style'
 import type { RFNodeData } from './graph-adapter'
@@ -221,12 +221,16 @@ function NodeShell({
 /**
  * 按实例端点补齐各端点所在边（未写明的入口左、出口右，另有其他出口时 Error 下），
  * 并在任一端点所在边变化后强制 RF 重测句柄，连线才会跟着走。
+ * 首次挂载由 React Flow 内置 ResizeObserver 统一批量测量，仅在挂载后方位变化时触发单节点重测。
  */
 function useEndpointSides(id: string, sides: EndpointSides | undefined, set: GraphEndpointSet): EndpointSides {
   const update = useUpdateNodeInternals()
   const resolved = resolveEndpointSides(sides, endpointIds(set))
   const key = JSON.stringify(resolved)
+  const prevKeyRef = useRef(key)
   useEffect(() => {
+    if (prevKeyRef.current === key) return
+    prevKeyRef.current = key
     const t = requestAnimationFrame(() => update(id))
     return () => cancelAnimationFrame(t)
   }, [id, key, update])
@@ -235,7 +239,10 @@ function useEndpointSides(id: string, sides: EndpointSides | undefined, set: Gra
 
 function useErrorHandleInternals(id: string, showError: boolean) {
   const update = useUpdateNodeInternals()
+  const prevRef = useRef(showError)
   useEffect(() => {
+    if (prevRef.current === showError) return
+    prevRef.current = showError
     const t = requestAnimationFrame(() => update(id))
     return () => cancelAnimationFrame(t)
   }, [id, showError, update])
@@ -451,7 +458,7 @@ export function StepNodeView({ id, data, selected }: NodeProps<Node<RFNodeData>>
       </div>
       <OutputHandles
         sides={sides}
-        items={isStopError ? [ERROR_OUTPUT] : [{ id: GRAPH_DEFAULT_OUTPUT, tone: 'plain' }, ...(showErrorHandle ? [ERROR_OUTPUT] : [])]}
+        items={isStopError ? [] : [{ id: GRAPH_DEFAULT_OUTPUT, tone: 'plain' }, ...(showErrorHandle ? [ERROR_OUTPUT] : [])]}
       />
     </NodeShell>
   )
@@ -471,9 +478,12 @@ export function MergeNodeView({ id, data, selected }: NodeProps<Node<RFNodeData>
   const modeRaw = String(data.config?.Mode || 'any')
   const mode = modeRaw === 'all' ? 'all' : 'any'
   const h = branchCardHeight(inputs.length)
-  // 入边句柄数变化时重测锚点
+  // 入边句柄数在挂载后变化时重测锚点
   const update = useUpdateNodeInternals()
+  const prevInLenRef = useRef(inputs.length)
   useEffect(() => {
+    if (prevInLenRef.current === inputs.length) return
+    prevInLenRef.current = inputs.length
     const t = requestAnimationFrame(() => update(id))
     return () => cancelAnimationFrame(t)
   }, [id, inputs.length, update])
@@ -559,7 +569,10 @@ export function ParallelNodeView({ id, data, selected }: NodeProps<Node<RFNodeDa
   const outs = set.outputs
   const h = branchCardHeight(outs.length)
   const update = useUpdateNodeInternals()
+  const prevOutLenRef = useRef(outs.length)
   useEffect(() => {
+    if (prevOutLenRef.current === outs.length) return
+    prevOutLenRef.current = outs.length
     const t = requestAnimationFrame(() => update(id))
     return () => cancelAnimationFrame(t)
   }, [id, outs.length, update])
@@ -771,13 +784,27 @@ export function MapNodeView({ id, data, selected }: NodeProps<Node<RFNodeData>>)
   )
 }
 
+/**
+ * 节点卡片 props 相等判定：忽略拖拽途中每帧变化的 positionAbsoluteX / positionAbsoluteY / dragging，
+ * 使被拖节点仅由 React Flow 外层容器通过 CSS transform 平移，跳过内部卡片虚拟 DOM 重渲染。
+ */
+function areNodePropsEqual<T extends Node>(prev: NodeProps<T>, next: NodeProps<T>): boolean {
+  return (
+    prev.id === next.id &&
+    prev.selected === next.selected &&
+    prev.data === next.data &&
+    prev.width === next.width &&
+    prev.height === next.height
+  )
+}
+
 export const graphNodeTypes = {
-  start: StartNodeView,
-  end: EndNodeView,
-  step: StepNodeView,
-  switch: SwitchNodeView,
-  map: MapNodeView,
-  merge: MergeNodeView,
-  parallel: ParallelNodeView,
-  annotation: AnnotationBoxView,
+  start: memo(StartNodeView, areNodePropsEqual),
+  end: memo(EndNodeView, areNodePropsEqual),
+  step: memo(StepNodeView, areNodePropsEqual),
+  switch: memo(SwitchNodeView, areNodePropsEqual),
+  map: memo(MapNodeView, areNodePropsEqual),
+  merge: memo(MergeNodeView, areNodePropsEqual),
+  parallel: memo(ParallelNodeView, areNodePropsEqual),
+  annotation: memo(AnnotationBoxView, areNodePropsEqual),
 }

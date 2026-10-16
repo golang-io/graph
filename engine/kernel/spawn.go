@@ -66,8 +66,8 @@ func (st *state) embedded(sp node.Spawn) graph.Graph {
 	return g
 }
 
-// spawn 发起子 Task：graphs[i] 是 spawns[i] 使用的图（身份已确定），子 Task 的 GraphID / GraphVersion 列取自编译后的图。
-// 全部子 Task 先编译并校验输入，任一失败则本节点失败、一个也不发起。
+// spawn 发起子 Task：graphs[i] 是 spawns[i] 使用的图（身份已确定），子 Task 的 GraphID / GraphVersion 列取自该图。
+// 全部子 Task 先校验图定义与输入，任一失败则本节点失败、一个也不发起。
 // 发起的等待记入工作视图（Slot → TaskID），Run 进入 WAITING(subgraph)，由 finish 输出 StartChild；
 // 引擎收到 StartChild 后把子 Task 记为被等待（durable 置 Awaited=true，immediate 记入内存等待关系）。
 func (st *state) spawn(r *engine.Run, n graph.Node, spawns []node.Spawn, graphs []graph.Graph) error {
@@ -77,28 +77,29 @@ func (st *state) spawn(r *engine.Run, n graph.Node, spawns []node.Spawn, graphs 
 	policy.Debug = nil
 	starts := make([]StartChild, 0, len(spawns))
 	for i, sp := range spawns {
-		compiled, err := st.compile(graphs[i])
-		if err != nil {
+		g := graphs[i]
+		if err := st.c.reg.Validate(g); err != nil {
 			return st.nodeFailed(r, n, fmt.Errorf("spawn %s: %w", n.ID, err))
 		}
 		input := maps.Clone(sp.Input)
 		if input == nil {
 			input = map[string]any{}
 		}
-		if err := compiled.CheckInput(input); err != nil {
+		if err := CheckInput(g.InputSchema, input); err != nil {
 			return st.nodeFailed(r, n, fmt.Errorf("spawn %s: %w", n.ID, err))
 		}
+		var err error
 		if input, err = Normalize(input); err != nil {
 			return st.nodeFailed(r, n, fmt.Errorf("spawn %s: %w", n.ID, err))
 		}
 		child := &engine.Task{
 			TaskID: st.env.newID(), TicketID: t.TicketID, EngineKind: t.EngineKind,
-			GraphID: compiled.Graph.GraphID, GraphVersion: compiled.Graph.GraphVersion,
+			GraphID: g.GraphID, GraphVersion: g.GraphVersion,
 			Status: graph.PENDING, Policy: policy, Input: input,
 			ParentTaskID: t.TaskID, ParentRunID: r.RunID, Slot: sp.Slot, Depth: t.Depth + 1,
-			Graph: compiled.Graph, StartedAt: st.now, CreatedAt: st.now,
+			Graph: g, StartedAt: st.now, CreatedAt: st.now,
 		}
-		starts = append(starts, StartChild{Task: child, Compiled: compiled})
+		starts = append(starts, StartChild{Task: child})
 	}
 	for i, sc := range starts {
 		st.await(r.RunID, spawns[i].Slot, sc.Task.TaskID)
@@ -106,13 +107,6 @@ func (st *state) spawn(r *engine.Run, n graph.Node, spawns []node.Spawn, graphs 
 	st.children = append(st.children, starts...)
 	st.park(r)
 	return nil
-}
-
-func (st *state) compile(g graph.Graph) (*Compiled, error) {
-	if st.env.Compile != nil {
-		return st.env.Compile(g)
-	}
-	return Compile(&g, st.c.Registry)
 }
 
 // park 让 Run 等待子 Task 结束。

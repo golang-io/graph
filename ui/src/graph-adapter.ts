@@ -160,8 +160,9 @@ export function graphToFlow(
   graph: GraphJSON,
   ui?: GraphLayoutUI | null,
   registry?: NodeTypeRegistry | null,
+  projectedOverride?: ReturnType<typeof projectDocument>,
 ): { nodes: Node<RFNodeData>[]; edges: Edge[] } {
-  const projected = projectDocument({ Graph: graph, UI: ui ?? undefined })
+  const projected = projectedOverride ?? projectDocument({ Graph: graph, UI: ui ?? undefined })
   const business = projected.nodes.filter((n) => n.type !== 'annotation')
   const byID = new Map(business.map((n) => [n.id, n]))
   const containers = fitContainers(business, (n) => editorNodeSize(n, registry))
@@ -176,6 +177,7 @@ export function graphToFlow(
       ...(parent ? { parentId: parent.id } : {}),
       width: w,
       height: h,
+      measured: { width: w, height: h },
       style: { width: w, height: h },
       data: {
         label: p.name || defaultLabel(p.type),
@@ -214,9 +216,10 @@ export function annotationNodeFromStickyNote(s: GraphUIStickyNote): Node<RFNodeD
     id: s.ID,
     type: 'annotation',
     position: { x: s.X, y: s.Y },
-    // 同时写 width/height 与 style：RF 把前者传给 NodeProps；后者管 DOM
+    // 同时写 width/height、measured 与 style：RF 把前者传给 NodeProps；measured 保留 handleBounds 避免重测；style 管 DOM
     width: s.Width,
     height: s.Height,
+    measured: { width: s.Width, height: s.Height },
     style: { width: s.Width, height: s.Height },
     zIndex: -1,
     connectable: false,

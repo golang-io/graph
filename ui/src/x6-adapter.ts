@@ -499,8 +499,8 @@ export function editorNodeToX6(n: GraphEditorNode, registry?: NodeTypeRegistry, 
     width,
     height,
     zIndex: n.body === 'expanded' ? 1 + Math.min(depth, 3) : 10 + depth,
-    // HTML 徽标按 data.endpointSides 计算，这里写入补齐后的端点所在边
-    data: {...n, endpointSides: directions, registry, ...(bodyToggle && n.body ? { bodyToggle: true } : {})},
+    // HTML 徽标按 data.endpointSides 计算，这里写入补齐后的端点所在边；同时记录 rawEndpointSides 供增量比对快速路径使用
+    data: {...n, endpointSides: directions, rawEndpointSides: n.endpointSides, registry, ...(bodyToggle && n.body ? { bodyToggle: true } : {})},
     ports: { groups, items: portItems },
   }
 }

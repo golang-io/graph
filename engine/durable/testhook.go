@@ -20,16 +20,3 @@ func DropDeliveries(eng engine.Engine, f func(kernel.Command) bool) {
 	}
 	e.drop.Store(&f)
 }
-
-// CompiledTasks 仅供测试使用：返回本进程 byTask（TaskID → 编译结果）中的条目数，
-// 用于验证 Task 结束后条目被删除、由其他进程结束的 Task 由恢复扫描清理。eng 必须是本包构造的引擎。
-//
-// CompiledTasks is for tests only: it reports how many tasks have a cached compiled graph in this process.
-func CompiledTasks(eng engine.Engine) int {
-	n := 0
-	eng.(*Engine).byTask.Range(func(_, _ any) bool {
-		n++
-		return true
-	})
-	return n
-}

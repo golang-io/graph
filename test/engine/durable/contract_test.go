@@ -10,9 +10,9 @@ import (
 )
 
 func TestContract(t *testing.T) {
-	enginetest.Run(t, test.TempDB, durable.With(durable.Options{Workers: 4, Shards: 4, PollInterval: 10 * time.Millisecond}))
+	enginetest.Run(t, test.TempDB, durable.With(durable.Options{Workers: 4, PollInterval: 10 * time.Millisecond}))
 }
 
 func BenchmarkEngine(b *testing.B) {
-	enginetest.Bench(b, test.TempDB, durable.With(durable.Options{Workers: 8, Shards: 8, PollInterval: 5 * time.Millisecond}))
+	enginetest.Bench(b, test.TempDB, durable.With(durable.Options{Workers: 8, PollInterval: 5 * time.Millisecond}))
 }

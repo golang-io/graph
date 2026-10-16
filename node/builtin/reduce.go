@@ -40,12 +40,7 @@ func (c ReduceInput) Validate() error {
 	if strings.TrimSpace(c.Expr) == "" {
 		return fmt.Errorf("Expr required")
 	}
-	if strings.TrimSpace(c.Init) != "" {
-		if err := graph.ValidateExpr(c.Init); err != nil {
-			return fmt.Errorf("Init: %w", err)
-		}
-	}
-	return graph.ValidateExpr(c.Expr)
+	return nil
 }
 
 func (c ReduceInput) Expressions() []node.Expression {
@@ -79,7 +74,7 @@ func (ReduceNode) Execute(ctx context.Context, in node.NodeInput) (node.NodeOutp
 	if err != nil {
 		return node.NodeOutput{}, err
 	}
-	set, err := ApplyReduce(cfg, maps.Clone(in.Vars))
+	set, err := ApplyReduce(cfg, in.Vars)
 	if err != nil {
 		return node.NodeOutput{}, err
 	}
@@ -108,11 +103,14 @@ func ApplyReduce(cfg ReduceInput, inputs map[string]any) (map[string]any, error)
 			return nil, fmt.Errorf("Init: %w", err)
 		}
 	}
+	if len(items) == 0 {
+		return map[string]any{ReduceResultField: acc}, nil
+	}
+	local := maps.Clone(inputs)
+	if local == nil {
+		local = map[string]any{}
+	}
 	for i, item := range items {
-		local := maps.Clone(inputs)
-		if local == nil {
-			local = map[string]any{}
-		}
 		local[ReduceAccLocal] = acc
 		local[ReduceItemLocal] = item
 		local[ReduceIndexLocal] = int64(i)
@@ -121,5 +119,5 @@ func ApplyReduce(cfg ReduceInput, inputs map[string]any) (map[string]any, error)
 			return nil, fmt.Errorf("item %d: %w", i, err)
 		}
 	}
-	return node.OutputMap(ReduceOutput{Result: acc}), nil
+	return map[string]any{ReduceResultField: acc}, nil
 }

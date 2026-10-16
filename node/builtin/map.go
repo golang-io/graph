@@ -97,14 +97,19 @@ func (MapNode) Spec() node.NodeSpec {
 
 // defaultMapBody 是新建 map 节点时的循环体：start → end，运行输入声明 Item / Index。
 // 有了它，刚从节点库拖出的 map 即可通过校验；画布再往循环体里添加节点。
+// Item 元素类型由上游 List 决定，用 AnyValueSchema；Index 为 integer。
 func defaultMapBody() *graph.Graph {
+	item := graph.AnyValueSchema()
+	item.Description = "本轮元素"
 	return &graph.Graph{
 		InputSchema: &jsonschema.Schema{
 			Type: "object",
 			Properties: map[string]*jsonschema.Schema{
-				MapItemField:  {Description: "本轮元素"},
+				MapItemField:  item,
 				MapIndexField: {Type: "integer", Description: "本轮第一个元素在 List 中的下标"},
 			},
+			Required:             []string{MapItemField},
+			AdditionalProperties: graph.SchemaFalse(),
 		},
 		Nodes: []graph.Node{{ID: "start", Kind: Start, Name: "开始"}, {ID: "end", Kind: End, Name: "结束"}},
 		Edges: []graph.Edge{{ID: "e1", From: graph.FormatEndpointID("start", node.DefaultOutput), To: graph.FormatEndpointID("end", node.DefaultInput)}},
@@ -112,8 +117,8 @@ func defaultMapBody() *graph.Graph {
 }
 
 // mapVisitState 是一次 map 访问的进度，保存在 Run.State；离开节点时内核清空。
+// 待遍历元素每轮直接从 in.Vars[List] 按下标切分，不重复存进 State，避免每轮序列化整份列表。
 type mapVisitState struct {
-	Units   []any `json:"Units"`   // 每轮的 item（已按 Chunk 切分）
 	Next    int   `json:"Next"`    // 下一个待启动的轮次
 	Done    int   `json:"Done"`    // 已结束的轮次数
 	Results []any `json:"Results"` // 按轮次下标收集的循环体输出
@@ -131,22 +136,25 @@ func (MapNode) Control(_ context.Context, in node.ControlInput) (node.NodeOutput
 		return node.NodeOutput{}, err
 	}
 	cfg = NormalizeMapInput(cfg)
+	items, err := ParseMapItems(in.NodeID, in.Vars)
+	if err != nil {
+		return node.NodeOutput{}, err
+	}
+	total := (len(items) + cfg.Chunk - 1) / cfg.Chunk
 	switch in.Event.Kind {
 	case "", node.EventStart:
-		items, err := ParseMapItems(in.NodeID, in.Vars)
-		if err != nil {
-			return node.NodeOutput{}, err
-		}
-		st := mapVisitState{Units: mapUnits(items, cfg.Chunk)}
-		st.Results = make([]any, len(st.Units))
-		return mapAdvance(cfg, in, st, cfg.MaxParallel)
+		st := mapVisitState{Results: make([]any, total)}
+		return mapAdvance(cfg, in, items, total, st, cfg.MaxParallel)
 	case node.EventChildDone:
 		var st mapVisitState
-		if err := json.Unmarshal(in.State, &st); err != nil {
+		// 使用 jsonx.DecodeStored 反序列化多轮状态，保证已收集 Results 中的动态整数保持 int64，
+		// 避免标准 json.Unmarshal 向 any 解码时将超过 2^53 的整数转为 float64 造成精度丢失。
+		// Decode multi-round state via jsonx.DecodeStored so dynamic integers in Results remain int64.
+		if err := jsonx.DecodeStored(in.State, &st); err != nil {
 			return node.NodeOutput{}, fmt.Errorf("map node %s: invalid state: %w", in.NodeID, err)
 		}
 		idx, err := strconv.Atoi(in.Event.Slot)
-		if err != nil || idx < 0 || idx >= len(st.Units) {
+		if err != nil || idx < 0 || idx >= total || len(st.Results) != total {
 			return node.NodeOutput{}, fmt.Errorf("map node %s: invalid iteration slot %q", in.NodeID, in.Event.Slot)
 		}
 		st.Done++
@@ -161,7 +169,7 @@ func (MapNode) Control(_ context.Context, in node.ControlInput) (node.NodeOutput
 			}
 			st.Results[idx] = result
 		}
-		return mapAdvance(cfg, in, st, 1)
+		return mapAdvance(cfg, in, items, total, st, 1)
 	default:
 		return node.NodeOutput{}, fmt.Errorf("map: unexpected event %q", in.Event.Kind)
 	}
@@ -169,20 +177,21 @@ func (MapNode) Control(_ context.Context, in node.ControlInput) (node.NodeOutput
 
 // mapAdvance 决定下一步：已失败且已启动的轮次全部结束时返回失败；全部轮次结束时输出 Results；
 // 否则在并发上限内最多再启动 room 轮（已失败时不再启动）；没有可启动的轮次时只写 State，继续等待在运行的子任务。
-func mapAdvance(cfg MapInput, in node.ControlInput, st mapVisitState, room int) (node.NodeOutput, error) {
+func mapAdvance(cfg MapInput, in node.ControlInput, items []any, total int, st mapVisitState, room int) (node.NodeOutput, error) {
 	if st.Failed != "" && st.Done == st.Next {
 		return node.NodeOutput{}, errors.New(st.Failed)
 	}
-	if st.Done == len(st.Units) {
+	if st.Done == total {
 		return node.Continue(map[string]any{MapResultsField: st.Results}, ""), nil
 	}
 	running := st.Next - st.Done
 	var spawns []node.Spawn
-	for st.Failed == "" && st.Next < len(st.Units) && running < cfg.MaxParallel && len(spawns) < room {
+	for st.Failed == "" && st.Next < total && running < cfg.MaxParallel && len(spawns) < room {
+		start := st.Next * cfg.Chunk
 		spawns = append(spawns, node.Spawn{
 			Slot:  strconv.Itoa(st.Next),
 			Graph: cfg.Body,
-			Input: mapBodyInput(cfg, in.Vars, st.Units[st.Next], int64(st.Next*cfg.Chunk)),
+			Input: mapBodyInput(cfg, in.Vars, mapUnitAt(items, start, cfg.Chunk), int64(start)),
 		})
 		st.Next++
 		running++
@@ -217,17 +226,12 @@ func mapBodyInput(cfg MapInput, vars map[string]any, item any, index int64) map[
 	return input
 }
 
-// mapUnits 按 Chunk 切分列表：Chunk=1 时每轮一个元素，否则每轮一个元素切片（最后一轮可能不足 Chunk）。
-func mapUnits(items []any, chunk int) []any {
-	units := make([]any, 0, (len(items)+chunk-1)/chunk)
-	for start := 0; start < len(items); start += chunk {
-		if chunk == 1 {
-			units = append(units, items[start])
-			continue
-		}
-		units = append(units, items[start:min(start+chunk, len(items))])
+// mapUnitAt 取第 start 个元素起始的一轮数据：Chunk=1 时为单个元素，否则为元素切片（最后一轮可能不足 Chunk）。
+func mapUnitAt(items []any, start, chunk int) any {
+	if chunk == 1 {
+		return items[start]
 	}
-	return units
+	return items[start:min(start+chunk, len(items))]
 }
 
 func asAnySlice(v any) ([]any, error) {

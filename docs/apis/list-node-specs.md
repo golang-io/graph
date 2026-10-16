@@ -28,7 +28,7 @@
 | `Renderer` | string | 几何角色扩展点名（可省略）；未知或缺省时前端回落通用节点。每个端点句柄所在的边由节点实例在定义的 `UI.EndpointSides` 中逐个写明（图布局，与本字段无关）。 |
 | `Endpoints` | object | `Inputs`、`Outputs`：种类级固定端点，同一种类的所有实例相同。图不允许成环；merge 的汇合方式由参数 `Mode` 决定，不在端点上声明。 |
 | `InputSchema` | object | 参数与数据槽的 JSON Schema（可省略；由参数结构体自动生成）。`properties` 描述各输入名；属性有 `title` 的进属性表单（控件由前端按名/`enum` 推测），无 `title` 的作输入绑定建议槽（结构体 `bind` 标签）；`required` 表示实例 `Inputs` 必须出现该键；`enum` 为下拉候选项；`additionalProperties` 允许自定义输入名。全部写入实例 `Node.Inputs`（字面量或引用均可）。 |
-| `OutputsByEndpoint` | object | 各控制流出端点的载荷 JSON Schema（可省略；仅标准关键字）。键为本地出端点名；空串 `""` 表示所有正常出口（不含 `Error`）共享的载荷。每份 Schema 的 `type` 为 `object`，`properties` 的键为输出名。省略时输出由参数决定：template / code 为 `Outputs[].Key`，merge 为 `Outputs[].Name`（均写入默认键）。声明了 `Error` 出端点的节点另有出口 `Error` 的载荷 `{"Error":…}`（只在错误出口之后可用），不列在此处。同一字段不得出现在多个出端点中。 |
+| `OutputsByEndpoint` | object | 各控制流出端点的载荷 JSON Schema（可省略；仅标准关键字）。键为本地出端点名；空串 `""` 表示所有正常出口共享的载荷。每份 Schema 的 `type` 为 `object`，`properties` 的键为输出名。省略时输出由参数决定：template / code 为 `Outputs[].Key`，merge 为 `Outputs[].Name`（均写入默认键）。同一字段不得出现在多个出端点中。 |
 | `Presets` | array | 预设：`ID`、`Label`、`Inputs`（可省略）。 |
 
 ## 错误码
@@ -51,7 +51,7 @@ curl -s http://127.0.0.1:8080/api/node-specs
         "Chunk": {"Value": 1},
         "MaxParallel": {"Value": 1},
         "Body": {"Value": {
-          "InputSchema": {"type": "object", "properties": {"Item": {"description": "本轮元素"}, "Index": {"type": "integer", "description": "本轮第一个元素在 List 中的下标"}}},
+          "InputSchema": {"type": "object", "required": ["Item"], "properties": {"Item": {"type": ["string", "integer", "number", "boolean", "object", "array", "null"], "description": "本轮元素"}, "Index": {"type": "integer", "description": "本轮第一个元素在 List 中的下标"}}, "additionalProperties": false},
           "Nodes": [{"ID": "start", "Kind": "__INNER__.start", "Name": "开始"}, {"ID": "end", "Kind": "__INNER__.end", "Name": "结束"}],
           "Edges": [{"ID": "e1", "From": "start.Out", "To": "end.In"}]
         }}

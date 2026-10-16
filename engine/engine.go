@@ -20,14 +20,13 @@ const (
 
 // 失败策略取值；执行模式取值见 graph.ExecSerial 等。
 const (
-	FailFast     = "fail_fast" // 任一 Run 失败（且无错误出口）即整个 Task 失败
-	FailContinue = "continue"  // 失败的 Run 结束，其余路径继续；没有任何路径到达 end 时 Task 失败
+	FailFast = "fail_fast" // 任一节点失败即整个 Task 失败
 )
 
 // TaskPolicy 是一次 Task 的执行策略，两个引擎接受同一取值范围并按同一语义执行。
 // TaskPolicy is the execution policy; both engines accept and apply the same values.
 type TaskPolicy struct {
-	FailPolicy    string        `json:"FailPolicy,omitempty"`    // fail_fast（默认）| continue
+	FailPolicy    string        `json:"FailPolicy,omitempty"`    // fail_fast（默认）
 	ExecutionMode string        `json:"ExecutionMode,omitempty"` // serial | parallel；只影响 immediate 的并发度
 	NodeTimeoutMS int64         `json:"NodeTimeoutMS,omitempty"` // 单个活动节点超时；0 表示不限
 	MaxAttempts   int           `json:"MaxAttempts,omitempty"`   // 活动节点最多执行次数，默认 1
@@ -43,7 +42,7 @@ func NormalizePolicy(p TaskPolicy) (TaskPolicy, error) {
 	if p.FailPolicy == "" {
 		p.FailPolicy = FailFast
 	}
-	if p.FailPolicy != FailFast && p.FailPolicy != FailContinue {
+	if p.FailPolicy != FailFast {
 		return p, fmt.Errorf("%w: FailPolicy %q", ErrInvalid, p.FailPolicy)
 	}
 	p.ExecutionMode = strings.TrimSpace(p.ExecutionMode)
@@ -73,7 +72,10 @@ func NormalizePolicy(p TaskPolicy) (TaskPolicy, error) {
 	if p.MaxAttempts > 1 && p.RetryDelayMS == 0 {
 		p.RetryDelayMS = 1000
 	}
-	p.Debug = p.Debug.Clone()
+	var err error
+	if p.Debug, err = p.Debug.Normalize(); err != nil {
+		return p, err
+	}
 	return p, nil
 }
 
@@ -94,7 +96,7 @@ type StartRequest struct {
 //
 // PinnedGraph returns Graph with its identity overwritten by the request's GraphID and GraphVersion.
 func (r StartRequest) PinnedGraph() graph.Graph {
-	g := r.Graph
+	g := r.Graph.Clone()
 	g.GraphID, g.GraphVersion = strings.TrimSpace(r.GraphID), r.GraphVersion
 	return g
 }

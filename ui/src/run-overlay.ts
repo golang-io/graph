@@ -121,14 +121,50 @@ export function rememberDebugSession(graphID: string, session: Partial<GraphDebu
   return next
 }
 
-/** Task 是否整体停在等待（调试暂停 / 单步 / 断点 / 子图）：调试等待需用户 resume，子图等待随子 Task 结束继续。 */
+/**
+ * Task 是否整体处于 WAITING 状态（可能为调试挂起，也可能为 subgraph 子任务等待或 join 汇合等待）。
+ * 注意：仅凭此状态不能判定为调试挂起；需结合 `overlayIsPausedOrDebugWaiting` 区分「调试挂起」与「任务仍在推进」。
+ *
+ * Reports whether `Task.Status` is `WAITING` (could be debug wait, subgraph wait, or join wait).
+ */
 export function overlayIsHung(snap?: Pick<GraphTaskSnapshot, 'Task'> | null): boolean {
   return (snap?.Task.Status ?? '').toUpperCase() === 'WAITING'
 }
 
 /** 返回所有停在调试关口（WaitReason === 'debug'）上的 Run。 */
-export function overlayDebugWaitingRuns(snap?: Pick<GraphTaskSnapshot, 'Runs'> | null): GraphRun[] {
+export function overlayDebugWaitingRuns(snap?: Partial<Pick<GraphTaskSnapshot, 'Runs'>> | null): GraphRun[] {
   return (snap?.Runs ?? []).filter((r) => r.Status === 'WAITING' && r.WaitReason === 'debug')
+}
+
+/**
+ * 判断 Task 是否处于调试挂起状态（`Task.Paused` 为 true，或存在停在 `WaitReason === 'debug'` 的 Run）。
+ * 仅当此函数返回 true 时，前端才展示「单步下一步 / 继续」并允许携带 `DebugAction` 调用 `resume`。
+ *
+ * Reports whether the task is paused for debugging (`Task.Paused` or any run has `WaitReason === 'debug'`).
+ */
+export function overlayIsPausedOrDebugWaiting(
+  snap?: (Pick<GraphTaskSnapshot, 'Task'> & Partial<Pick<GraphTaskSnapshot, 'Runs'>>) | null,
+): boolean {
+  if (!snap) return false
+  return Boolean(snap.Task.Paused || overlayDebugWaitingRuns(snap).length > 0)
+}
+
+/**
+ * 判断 Task 是否仍在正常推进中：
+ * - `Task.Status` 为 `RUNNING` 或 `PENDING`；
+ * - 或 `Task.Status` 为 `WAITING` 且未处于调试挂起（如 `WAITING(subgraph)` 等待子图/Map 子任务结束、或 `WAITING(join)` 等待并行分支汇合）。
+ * 当任务处于该状态且未暂停时，前端应视为运行中，允许点击「暂停」或「取消」。
+ *
+ * Reports whether the task is actively progressing (including non-debug WAITING such as subgraph or join).
+ */
+export function overlayIsRunning(
+  snap?: (Pick<GraphTaskSnapshot, 'Task'> & Partial<Pick<GraphTaskSnapshot, 'Runs'>>) | null,
+): boolean {
+  if (!snap) return false
+  const status = (snap.Task.Status ?? '').toUpperCase()
+  if (status === 'RUNNING' || status === 'PENDING') return true
+  if (status === 'WAITING') return !overlayIsPausedOrDebugWaiting(snap)
+  return false
 }
 
 /** 处于 WAITING 的 Run 的等待原因（join 除外，join 只是内部汇合）。 */

@@ -72,11 +72,7 @@ func TestNodeRegistryCallsSpecOnce(t *testing.T) {
 	r.Get("counted")
 	r.List()
 	r.Inline("counted")
-	r.Endpoints("counted")
-	if _, err := r.OutputRule(inst); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.ValidateOutput(inst, NodeOutput{}); err != nil {
+	if err := r.CheckOutput(inst, NodeOutput{}); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 1 {
@@ -175,34 +171,43 @@ func TestWithParamsRoundTrip(t *testing.T) {
 	}
 }
 
-func TestValidateOutputShapes(t *testing.T) {
-	r, err := NewRegistry(protocolTestType("shape_activity"))
+type stubCtrlNode struct {
+	spec NodeSpec
+}
+
+func (s stubCtrlNode) Spec() NodeSpec { return s.spec }
+func (s stubCtrlNode) Control(context.Context, ControlInput) (NodeOutput, error) {
+	return NodeOutput{}, nil
+}
+
+// TestCheckOutputControllerOnlyFields 确认 State 与 EffectSpawn 仅允许实现 Controller 的节点种类返回。
+func TestCheckOutputControllerOnlyFields(t *testing.T) {
+	execNode := protocolTestType("plain_exec")
+	ctrlNode := stubCtrlNode{spec: WithParams(NodeSpec{
+		ID: "plain_ctrl", Name: "测试控制",
+		Endpoints: EndpointSpec{Inputs: []string{DefaultInput}, Outputs: []string{DefaultOutput}},
+	}, struct{}{})}
+	r, err := NewRegistry(execNode, ctrlNode)
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := graph.Node{ID: "s", Kind: "shape_activity"}
-	ok := []NodeOutput{
-		{},
-		{Set: map[string]any{}},
-		{Effect: &Effect{Kind: EffectFail, Message: "x"}},
-		{State: json.RawMessage(`{}`)},
+	execInst := graph.Node{ID: "e", Kind: "plain_exec"}
+	ctrlInst := graph.Node{ID: "c", Kind: "plain_ctrl"}
+
+	stateOut := Wait(json.RawMessage(`{"step":1}`))
+	spawnOut := SpawnChildren([]Spawn{{GraphID: "child"}}, json.RawMessage(`{"step":1}`))
+	spawnNoStateOut := SpawnChildren([]Spawn{{GraphID: "child"}}, nil)
+
+	if err := r.CheckOutput(execInst, stateOut); err == nil || !strings.Contains(err.Error(), "State is only allowed for Controller") {
+		t.Fatalf("executor returning State err = %v", err)
 	}
-	for i, out := range ok {
-		if err := r.ValidateOutput(n, out); err != nil {
-			t.Fatalf("ok[%d]: %v", i, err)
-		}
+	if err := r.CheckOutput(execInst, spawnNoStateOut); err == nil || !strings.Contains(err.Error(), "spawn effect is only allowed for Controller") {
+		t.Fatalf("executor returning EffectSpawn err = %v", err)
 	}
-	bad := []NodeOutput{
-		{Effect: &Effect{Kind: EffectFail, Message: "x"}, Endpoint: DefaultOutput},
-		{Effect: &Effect{Kind: EffectFail, Message: "x"}, Set: map[string]any{"a": 1}},
-		{Effect: &Effect{Kind: EffectSpawn}},
-		{Effect: &Effect{Kind: EffectSpawn, Spawns: []Spawn{{}}}},
-		{Effect: &Effect{Kind: EffectSpawn, Spawns: []Spawn{{GraphID: "g", Graph: &graph.Graph{}}}}},
-		{Effect: &Effect{Kind: EffectSpawn, Spawns: []Spawn{{Slot: "0", GraphID: "g"}, {Slot: "0", GraphID: "g"}}}},
+	if err := r.CheckOutput(ctrlInst, stateOut); err != nil {
+		t.Fatalf("controller returning State err = %v", err)
 	}
-	for i, out := range bad {
-		if err := r.ValidateOutput(n, out); err == nil {
-			t.Fatalf("bad[%d]: want error", i)
-		}
+	if err := r.CheckOutput(ctrlInst, spawnOut); err != nil {
+		t.Fatalf("controller returning EffectSpawn err = %v", err)
 	}
 }

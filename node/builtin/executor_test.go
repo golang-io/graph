@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
+	"reflect"
 	"testing"
 
 	"github.com/golang-io/graph"
@@ -57,5 +59,66 @@ func TestLLMRequiresInvoker(t *testing.T) {
 	})
 	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestMapControlPreservesLargeInt64AcrossRounds(t *testing.T) {
+	items := []any{
+		int64(9007199254740993),  // 2^53 + 1
+		int64(9007199254740995),  // 2^53 + 3
+		int64(-9007199254740993), // -(2^53 + 1)
+		int64(math.MaxInt64),
+		int64(math.MinInt64),
+		map[string]any{"id": int64(9007199254740993), "arr": []any{int64(9007199254740995)}},
+	}
+	cfg := MapInput{
+		Chunk:       1,
+		MaxParallel: 1,
+		Body:        defaultMapBody(),
+	}
+	vars := map[string]any{MapListField: items}
+
+	// 首轮 start：启动第 0 轮，后续 5 项保存在 State.Units 中。
+	out, err := MapNode{}.Control(context.Background(), node.ControlInput{
+		NodeID: "m",
+		Vars:   vars,
+		Params: cfg,
+		Event:  node.Event{Kind: node.EventStart},
+	})
+	if err != nil {
+		t.Fatalf("start err: %v", err)
+	}
+
+	// 逐轮推进 child_done，检查每轮派发的 Spawn.Input[Item] 以及最终汇总的 Results 均保持精确 int64。
+	for i := range items {
+		if len(out.Effect.Spawns) != 1 {
+			t.Fatalf("round %d spawns = %d, want 1", i, len(out.Effect.Spawns))
+		}
+		gotItem := out.Effect.Spawns[0].Input[MapItemField]
+		if !reflect.DeepEqual(gotItem, items[i]) {
+			t.Fatalf("round %d spawn item = %#v (%T), want %#v (%T)", i, gotItem, gotItem, items[i], items[i])
+		}
+		out, err = MapNode{}.Control(context.Background(), node.ControlInput{
+			NodeID: "m",
+			Vars:   vars,
+			Params: cfg,
+			State:  out.State,
+			Event: node.Event{
+				Kind:    node.EventChildDone,
+				Slot:    out.Effect.Spawns[0].Slot,
+				Payload: map[string]any{"Value": gotItem},
+			},
+		})
+		if err != nil {
+			t.Fatalf("round %d child_done err: %v", i, err)
+		}
+	}
+
+	wantResults := make([]any, len(items))
+	for i, item := range items {
+		wantResults[i] = map[string]any{"Value": item}
+	}
+	if !reflect.DeepEqual(out.Set[MapResultsField], wantResults) {
+		t.Fatalf("final results = %#v, want %#v", out.Set[MapResultsField], wantResults)
 	}
 }

@@ -38,13 +38,14 @@ func jsonEq(t *testing.T, got, want any) {
 	}
 }
 
-// all 汇合：两个分支的 ActivityDone 依次应用，汇合只触发一次，父 Run 进入汇合节点一次。
+// all 汇合：两个分支的 ActivityDone 依次应用，汇合只触发一次，Merge 节点与下游只进入一次。
 func TestJoinAllFiresOnce(t *testing.T) {
 	w := newWorld(t, false)
 	g := G([]graph.Node{op("fork", nil), op("l", map[string]any{"l": 1}), op("r", map[string]any{"r": 2}),
+		N("m", builtin.Merge, builtin.MergeInput{Mode: "all"}),
 		tpl("join", refs{"l": R("l", "l"), "r": R("r", "r")}, "sum", "{{l}}+{{r}}"),
 		finish(refs{"sum": R("join", "sum")})},
-		E("fork", "l"), E("fork", "r"), E("l", "join"), E("r", "join"), E("join", "finish"))
+		E("fork", "l"), E("fork", "r"), E("l", "m"), E("r", "m"), E("m", "join"), E("join", "finish"))
 	id := w.start(g, nil, engine.TaskPolicy{})
 	fork := w.dispatch(id, w.at(id, "fork", graph.PENDING).RunID)
 	cmds := w.must(id, done(fork, nil, nil))
@@ -55,29 +56,19 @@ func TestJoinAllFiresOnce(t *testing.T) {
 	r := w.dispatch(id, w.at(id, "r", graph.PENDING).RunID)
 
 	w.must(id, done(l, map[string]any{"l": 1}, nil))
-	parent := w.at(id, "fork", graph.WAITING)
-	if len(parent.Arrivals) != 1 || parent.JoinNodeID != "join" || parent.LiveChildren != 1 {
-		t.Fatalf("after first arrival: %+v", parent)
+	waiter := w.at(id, "m", graph.WAITING)
+	if len(waiter.Arrivals) != 1 || waiter.WaitReason != engine.WaitJoin {
+		t.Fatalf("after first arrival: %+v", waiter)
 	}
 	w.must(id, done(r, map[string]any{"r": 2}, nil))
 	if task := w.task(id); task.Status != graph.SUCCEEDED {
 		t.Fatalf("task = %s %s%s", task.Status, task.Error, w.dump(id))
 	}
 	jsonEq(t, w.task(id).Output, map[string]any{"sum": "1+2"})
-	// 父 Run 依次经过 _start、fork、join、finish：Seq 为 4 说明汇合节点只进入了一次。
-	// 根 Run 是 ParentRunID 为空的唯一一条。
-	var root *engine.Run
-	for _, r := range w.runs[id] {
-		if r.ParentRunID == "" {
-			root = r
-		}
-	}
-	if root == nil {
-		t.Fatalf("root run not found%s", w.dump(id))
-	}
-	// 无输出节点（_start、fork）离开时也会写入空 map {}，确保运行轨迹不漏掉经过的无状态节点。
-	if root.Seq != 4 || root.Outputs["_start"] == nil || root.Outputs["fork"] == nil || root.Outputs["join"] == nil {
-		t.Fatalf("root run = seq %d outputs %v", root.Seq, root.Outputs)
+	// 汇合后继续推进的 Run 依次经过 l、m、join、finish（Seq 为 4），无输出节点（_start、fork、m）均写入空 map {}。
+	merged := w.runs[id][waiter.RunID]
+	if merged.Seq != 4 || merged.Outputs["_start"] == nil || merged.Outputs["fork"] == nil || merged.Outputs["m"] == nil || merged.Outputs["join"] == nil {
+		t.Fatalf("merged run = seq %d outputs %v", merged.Seq, merged.Outputs)
 	}
 }
 
@@ -258,8 +249,9 @@ func TestActivityPrecheckFailure(t *testing.T) {
 	g := GI([]string{"score"}, []graph.Node{
 		In(N("gate", builtin.Switch, builtin.SwitchInput{Expr: "score >= 60"}), refs{"score": R(graph.InputSource, "score")}),
 		op("hi", map[string]any{"tag": "hi"}), op("lo", nil),
+		N("m", builtin.Merge, builtin.MergeInput{Mode: "any"}),
 		In(op("use", nil), refs{"tag": R("hi", "tag")}), finish(nil)},
-		E("gate", "hi", "Case0"), E("gate", "lo", "Case1"), E("hi", "use"), E("lo", "use"), E("use", "finish"))
+		E("gate", "hi", "Case0"), E("gate", "lo", "Case1"), E("hi", "m"), E("lo", "m"), E("m", "use"), E("use", "finish"))
 	id := w.start(g, map[string]any{"score": 10}, engine.TaskPolicy{MaxAttempts: 3})
 	cmds := w.must(id, done(w.dispatch(id, w.at(id, "lo", graph.PENDING).RunID), nil, nil))
 	if n := countCmds[kernel.ExecuteActivity](cmds); n != 0 {
@@ -299,6 +291,43 @@ func TestInjectInlineNode(t *testing.T) {
 	if task := w.task(stopID); task.Status != graph.FAILED || !strings.Contains(task.Error, "injected boom") {
 		t.Fatalf("stop_error inject = %s %q, want injected boom", task.Status, task.Error)
 	}
+
+	// 调试注入可 Mock 尚未执行的分支节点的输出，使依赖该输出的下游节点正常推进，且整数自动规整为 int64。
+	swGraph := GI([]string{"score"}, []graph.Node{
+		In(N("gate", builtin.Switch, builtin.SwitchInput{Expr: "score >= 60"}), refs{"score": R(graph.InputSource, "score")}),
+		op("hi", map[string]any{"tag": "hi"}), op("lo", nil),
+		N("m", builtin.Merge, builtin.MergeInput{Mode: "any"}),
+		finish(refs{"tag": R("hi", "tag")}),
+	}, E("gate", "hi", "Case0"), E("gate", "lo", "Case1"), E("hi", "m"), E("lo", "m"), E("m", "finish"))
+	mockPolicy := engine.TaskPolicy{Debug: &engine.DebugOptions{
+		Injects: map[string]engine.DebugInject{"finish": {Vars: map[string]any{"tag": 42}}},
+	}}
+	mockID := w.start(swGraph, map[string]any{"score": 10}, mockPolicy)
+	if got := w.task(mockID); got.Status != graph.SUCCEEDED || got.Output["tag"] != int64(42) {
+		t.Fatalf("mock missing upstream = %s %#v", got.Status, got.Output)
+	}
+
+	// 调试注入参数类型不合法或违反节点参数 Validate 时，NewTask / Resume 均前置拒绝（返回 ErrInvalid）。
+	badMapBody := GI([]string{builtin.MapItemField}, []graph.Node{finish(nil)})
+	mapG := GI([]string{"items"}, []graph.Node{
+		In(N("lp", builtin.Map, builtin.MapInput{Body: &badMapBody}), refs{builtin.MapListField: R(graph.InputSource, "items")}),
+		finish(nil),
+	}, E("lp", "finish"))
+	for _, badVars := range []map[string]any{
+		{"Chunk": "not-an-int"},
+		{"Chunk": -5},
+	} {
+		_, err := kernel.NewTask(engine.KindImmediate, engine.StartRequest{
+			Graph: mapG,
+			Input: map[string]any{"items": []any{1}},
+			Policy: engine.TaskPolicy{Debug: &engine.DebugOptions{
+				Injects: map[string]engine.DebugInject{"lp": {Vars: badVars}},
+			}},
+		}, w.reg, w.env)
+		if !errors.Is(err, engine.ErrInvalid) {
+			t.Fatalf("NewTask with bad inject %v: err = %v, want ErrInvalid", badVars, err)
+		}
+	}
 }
 
 // 子图嵌套超过 graph.MaxSubgraphDepth：节点失败。
@@ -306,16 +335,12 @@ func TestSubgraphDepthLimit(t *testing.T) {
 	w := newWorld(t, true)
 	w.graphs["child"] = G([]graph.Node{finish(nil)})
 	g := G([]graph.Node{N("sub", builtin.SubGraph, builtin.SubGraphInput{GraphID: "child"}), finish(nil)}, E("sub", "finish"))
-	c, err := w.cache.Compile(g)
-	if err != nil {
-		t.Fatal(err)
-	}
-	task, err := kernel.NewTask(engine.KindImmediate, engine.StartRequest{Graph: g}, c, w.env)
+	task, err := kernel.NewTask(engine.KindImmediate, engine.StartRequest{Graph: g}, w.reg, w.env)
 	if err != nil {
 		t.Fatal(err)
 	}
 	task.Depth = graph.MaxSubgraphDepth
-	w.add(task, c)
+	w.add(task)
 	w.must(task.TaskID, kernel.Started{})
 	if got := w.task(task.TaskID); got.Status != graph.FAILED || !strings.Contains(got.Error, "max nesting depth") {
 		t.Fatalf("task = %s %q", got.Status, got.Error)
@@ -409,8 +434,9 @@ func TestRejections(t *testing.T) {
 // 同一输入调用两次 Apply：结果相同；入参未被修改。每次有改动时 Version 加 1。
 func TestApplyDeterministicAndPure(t *testing.T) {
 	w := newWorld(t, false)
-	g := G([]graph.Node{op("fork", nil), op("l", nil), op("r", nil), finish(nil)},
-		E("fork", "l"), E("fork", "r"), E("l", "finish"), E("r", "finish"))
+	g := G([]graph.Node{op("fork", nil), op("l", nil), op("r", nil),
+		N("m", builtin.Merge, builtin.MergeInput{Mode: "all"}), finish(nil)},
+		E("fork", "l"), E("fork", "r"), E("l", "m"), E("r", "m"), E("m", "finish"))
 	id := w.start(g, nil, engine.TaskPolicy{})
 	fork := w.dispatch(id, w.at(id, "fork", graph.PENDING).RunID)
 	task, runs := w.task(id), w.list(id)
@@ -422,8 +448,8 @@ func TestApplyDeterministicAndPure(t *testing.T) {
 		return env
 	}
 	ev := done(fork, nil, nil)
-	ch1, cmds1, err1 := kernel.Apply(w.comp[id], task, runs, ev, envAt())
-	ch2, cmds2, err2 := kernel.Apply(w.comp[id], task, runs, ev, envAt())
+	ch1, cmds1, err1 := kernel.Apply(w.reg, task, runs, ev, envAt())
+	ch2, cmds2, err2 := kernel.Apply(w.reg, task, runs, ev, envAt())
 	if err1 != nil || err2 != nil {
 		t.Fatal(err1, err2)
 	}
@@ -452,20 +478,88 @@ func (badCtrl) Control(context.Context, node.ControlInput) (node.NodeOutput, err
 func TestControllerInvalidOutputIsDefect(t *testing.T) {
 	w := newWorld(t, false, badCtrl{})
 	g := G([]graph.Node{N("bad", "bad_ctrl", nil), finish(nil)}, E("bad", "finish"))
-	c, err := w.cache.Compile(g)
+	task, err := kernel.NewTask(engine.KindImmediate, engine.StartRequest{Graph: g}, w.reg, w.env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	task, err := kernel.NewTask(engine.KindImmediate, engine.StartRequest{Graph: g}, c, w.env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w.add(task, c)
+	w.add(task)
 	if _, err := w.apply(task.TaskID, kernel.Started{}); err == nil || kernel.IsRejection(err) {
 		t.Fatalf("err = %v, want kernel defect", err)
 	}
 	if got := w.task(task.TaskID); got.Status != graph.FAILED || !strings.Contains(got.Error, "kernel error") {
 		t.Fatalf("task = %s %q", got.Status, got.Error)
+	}
+}
+
+// spawnExec 是试图返回 EffectSpawn 的纯 Executor（未实现 Controller），可按 inline 配置为内联或活动节点。
+type spawnExec struct {
+	id     string
+	inline bool
+	body   graph.Graph
+}
+
+func (e spawnExec) Spec() node.NodeSpec {
+	return node.WithParams(node.NodeSpec{
+		ID: e.id, Name: e.id, Inline: e.inline, Endpoints: node.DefaultEndpoints(),
+	}, struct{}{})
+}
+
+func (e spawnExec) Execute(context.Context, node.NodeInput) (node.NodeOutput, error) {
+	body := e.body
+	return node.SpawnChildren([]node.Spawn{{Slot: "0", Graph: &body}}, nil), nil
+}
+
+// 纯 Executor（活动节点与内联节点）返回 EffectSpawn 时被拒绝，不会派生任何子 Task。
+func TestExecutorSpawnRejected(t *testing.T) {
+	body := G([]graph.Node{op("b", nil), finish(nil)}, E("b", "finish"))
+
+	// 1. 活动 Executor 返回 EffectSpawn：按活动节点非法输出处理，不派生子任务，最终使 Task FAILED。
+	wAct := newWorld(t, false, spawnExec{id: "act_spawn_exec", inline: false, body: body})
+	gAct := G([]graph.Node{N("sp", "act_spawn_exec", nil), finish(nil)}, E("sp", "finish"))
+	actID := wAct.start(gAct, nil, engine.TaskPolicy{})
+	cmd := wAct.dispatch(actID, wAct.at(actID, "sp", graph.PENDING).RunID)
+	actOut := node.SpawnChildren([]node.Spawn{{Slot: "0", Graph: &body}}, nil)
+	wAct.must(actID, kernel.ActivityDone{RunID: cmd.RunID, Seq: cmd.Seq, Attempt: cmd.Attempt, Output: actOut})
+	if got := wAct.task(actID); got.Status != graph.FAILED || !strings.Contains(got.Error, "spawn effect is only allowed for Controller") {
+		t.Fatalf("activity executor spawn task = %s %q", got.Status, got.Error)
+	}
+	if n := countLogged[kernel.StartChild](wAct); n != 0 {
+		t.Fatalf("activity executor StartChild count = %d, want 0", n)
+	}
+
+	// 2. 内联 Executor 返回 EffectSpawn：Apply 返回内核缺陷 error，Task FAILED，不派生子任务。
+	wInline := newWorld(t, false, spawnExec{id: "inline_spawn_exec", inline: true, body: body})
+	gInline := G([]graph.Node{N("sp", "inline_spawn_exec", nil), finish(nil)}, E("sp", "finish"))
+	inlineTask, err := kernel.NewTask(engine.KindImmediate, engine.StartRequest{Graph: gInline}, wInline.reg, wInline.env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wInline.add(inlineTask)
+	if _, err := wInline.apply(inlineTask.TaskID, kernel.Started{}); err == nil || kernel.IsRejection(err) || !strings.Contains(err.Error(), "spawn effect is only allowed for Controller") {
+		t.Fatalf("inline executor spawn err = %v, want kernel defect", err)
+	}
+	if got := wInline.task(inlineTask.TaskID); got.Status != graph.FAILED || !strings.Contains(got.Error, "kernel error") {
+		t.Fatalf("inline executor spawn task = %s %q", got.Status, got.Error)
+	}
+	if n := countLogged[kernel.StartChild](wInline); n != 0 {
+		t.Fatalf("inline executor StartChild count = %d, want 0", n)
+	}
+
+	// 3. 异常状态下非 Controller 节点处于 WAITING(subgraph) 并收到 ChildDone：被防御性拦截为内核缺陷。
+	corruptRun := &engine.Run{
+		RunID: "r1", TaskID: actID, EngineKind: engine.KindImmediate,
+		NodeID: "sp", Seq: 1, Attempt: 1, Status: graph.WAITING, WaitReason: engine.WaitSubgraph,
+		Outputs: engine.Outputs{},
+	}
+	corruptTask := &engine.Task{
+		TaskID: actID, EngineKind: engine.KindImmediate, Status: graph.WAITING,
+		Graph: gAct, Policy: engine.TaskPolicy{MaxAttempts: 1},
+	}
+	_, _, err = kernel.Apply(wAct.reg, corruptTask, []*engine.Run{corruptRun},
+		kernel.ChildDone{RunID: "r1", Slot: "0", ChildTaskID: "c1", Status: graph.SUCCEEDED},
+		kernel.Env{Now: t0, Awaiting: map[string]map[string]string{"r1": {"0": "c1"}}})
+	if err == nil || kernel.IsRejection(err) || !strings.Contains(err.Error(), "is not a controller") {
+		t.Fatalf("non-controller ChildDone err = %v, want kernel defect", err)
 	}
 }
 
@@ -586,15 +680,11 @@ func TestSubgraphLoadedOnDemand(t *testing.T) {
 	w.graphs["child"] = G([]graph.Node{finish(nil)})
 	g := G([]graph.Node{N("sub", builtin.SubGraph, builtin.SubGraphInput{GraphID: "child"}), finish(nil)}, E("sub", "finish"))
 
-	c, err := w.cache.Compile(g)
+	task, err := kernel.NewTask(engine.KindImmediate, engine.StartRequest{Graph: g}, w.reg, w.env)
 	if err != nil {
 		t.Fatal(err)
 	}
-	task, err := kernel.NewTask(engine.KindImmediate, engine.StartRequest{Graph: g}, c, w.env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ch, cmds, err := kernel.Apply(c, task, nil, kernel.Started{}, w.env)
+	ch, cmds, err := kernel.Apply(w.reg, task, nil, kernel.Started{}, w.env)
 	if err != nil || !slices.Equal(ch.NeedGraphs, []string{"child"}) || !ch.Empty() || len(cmds) != 0 {
 		t.Fatalf("first apply = %+v %+v %v", ch, cmds, err)
 	}

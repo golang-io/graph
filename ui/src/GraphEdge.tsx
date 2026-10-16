@@ -6,11 +6,12 @@ import {
   EdgeLabelRenderer,
   getSmoothStepPath,
   Position,
-  useNodes,
   useStore,
+  useStoreApi,
+  type Edge,
   type EdgeProps,
 } from '@xyflow/react'
-import { useMemo } from 'react'
+import { createContext, useContext, useMemo } from 'react'
 import {
   isHandleBrandedWhen,
   parseEdgeRail,
@@ -26,6 +27,15 @@ import {
   GRAPH_RUN_STROKE_WIDTH,
   GRAPH_SELECTION_COLOR,
 } from './edge-style'
+
+/**
+ * 画布已提交布局的版本上下文（由 GraphCanvas 提供）。
+ * 节点拖拽过程中仅与被拖节点相连的边因 sourceX/Y 或 targetX/Y 变化实时重算路径，
+ * 其余无关边不订阅 60Hz 的全量 nodes 更新；待拖拽结束或布局写回时再通过此版本触发重算。
+ *
+ * Committed layout version context so unconnected edges do not re-render at 60Hz during node dragging.
+ */
+export const GraphLayoutVersionContext = createContext<unknown>(null)
 
 function posOf(p?: Position | string | null): 'left' | 'right' | 'top' | 'bottom' {
   if (p === Position.Left || p === 'left') return 'left'
@@ -49,6 +59,131 @@ function nodeBox(n: {
   }
 }
 
+/**
+ * 按 edges 数组引用缓存同源同宿兄弟边的轨道偏移（railIndex），
+ * 将每条边在每次 store 更新时的 O(E) 线性扫描降为 O(1) 查表。
+ */
+const railIndexByEdges = new WeakMap<readonly Edge[], Map<string, number>>()
+
+function getRailIndex(edges: readonly Edge[], id: string): number {
+  let byId = railIndexByEdges.get(edges)
+  if (!byId) {
+    byId = new Map()
+    const countByPair = new Map<string, number>()
+    for (const e of edges) {
+      const key = `${e.source}\0${e.target}`
+      const idx = countByPair.get(key) ?? 0
+      countByPair.set(key, idx + 1)
+      if (idx > 0) {
+        const k = Math.ceil(idx / 2)
+        byId.set(e.id, idx % 2 === 1 ? k : -k)
+      }
+    }
+    railIndexByEdges.set(edges, byId)
+  }
+  return byId.get(id) ?? 0
+}
+
+/**
+ * 按 React Flow store 实例维护节点障碍包围盒缓存，并在同一同步渲染批次（microtask 周期内）共享：
+ * - 同一渲染批次内的多条边直接复用当帧缓存（turnFresh === true）；
+ * - 跨帧（如拖拽连续帧）时，对比 nodeLookup 中每个节点的 internalNode 引用（internalRefById），
+ *   静止节点（引用未变）直接跳过，仅对当帧实际移动或缩放的节点重算包围盒，将每帧障碍更新开销降为 O(移动节点数)。
+ */
+type FlowObstacleCache = {
+  nodes: Array<{ id: string; box: Box }>
+  boxById: Map<string, Box>
+  indexById: Map<string, number>
+  internalRefById: Map<string, object>
+  turnFresh: boolean
+}
+
+const obstacleCacheByStore = new WeakMap<object, FlowObstacleCache>()
+
+function getFlowObstacleCache(store: ReturnType<typeof useStoreApi>): FlowObstacleCache {
+  let cached = obstacleCacheByStore.get(store)
+  if (cached?.turnFresh) return cached
+
+  const state = store.getState()
+
+  // 增量路径：节点集合未增删时，仅更新 internalNode 引用发生变化的节点（拖拽帧通常仅 1 个节点）
+  if (cached && state.nodeLookup && state.nodeLookup.size > 0) {
+    let structureChanged = false
+    let visibleCount = 0
+    for (const [id, n] of state.nodeLookup) {
+      if (n.hidden || isAnnotationNode(n)) continue
+      visibleCount++
+      if (cached.internalRefById.get(id) === n) continue
+      const idx = cached.indexById.get(id)
+      if (idx === undefined) {
+        structureChanged = true
+        break
+      }
+      const at = n.internals?.positionAbsolute ?? n.position
+      const box = nodeBox(n, at)
+      cached.nodes[idx]!.box = box
+      cached.boxById.set(id, box)
+      cached.internalRefById.set(id, n)
+    }
+    if (!structureChanged && visibleCount === cached.nodes.length) {
+      const ref = cached
+      ref.turnFresh = true
+      queueMicrotask(() => {
+        ref.turnFresh = false
+      })
+      return ref
+    }
+  }
+
+  const nodes: Array<{ id: string; box: Box }> = []
+  const boxById = new Map<string, Box>()
+  const indexById = new Map<string, number>()
+  const internalRefById = new Map<string, object>()
+
+  if (state.nodeLookup && state.nodeLookup.size > 0) {
+    for (const [id, n] of state.nodeLookup) {
+      if (n.hidden || isAnnotationNode(n)) continue
+      const at = n.internals?.positionAbsolute ?? n.position
+      const box = nodeBox(n, at)
+      indexById.set(id, nodes.length)
+      nodes.push({ id, box })
+      boxById.set(id, box)
+      internalRefById.set(id, n)
+    }
+  } else {
+    let byId: Map<string, (typeof state.nodes)[number]> | undefined
+    const absolute = (n: (typeof state.nodes)[number]): { x: number; y: number } => {
+      if (!n.parentId) return n.position
+      byId ??= new Map(state.nodes.map((item) => [item.id, item]))
+      const parent = byId.get(n.parentId)
+      if (!parent) return n.position
+      const at = absolute(parent)
+      return { x: at.x + n.position.x, y: at.y + n.position.y }
+    }
+    for (const n of state.nodes) {
+      if (n.hidden || isAnnotationNode(n)) continue
+      const box = nodeBox(n, absolute(n))
+      indexById.set(n.id, nodes.length)
+      nodes.push({ id: n.id, box })
+      boxById.set(n.id, box)
+      internalRefById.set(n.id, n)
+    }
+  }
+
+  const nextCache: FlowObstacleCache = {
+    nodes,
+    boxById,
+    indexById,
+    internalRefById,
+    turnFresh: true,
+  }
+  obstacleCacheByStore.set(store, nextCache)
+  queueMicrotask(() => {
+    nextCache.turnFresh = false
+  })
+  return nextCache
+}
+
 export function GraphSmartEdge(props: EdgeProps) {
   const {
     id,
@@ -67,23 +202,9 @@ export function GraphSmartEdge(props: EdgeProps) {
     data,
   } = props
 
-
-  const nodes = useNodes()
-  const railIndex = useStore((s) => {
-    let idx = 0
-    let found = false
-    for (const e of s.edges) {
-      if (e.source !== source || e.target !== target) continue
-      if (e.id === id) {
-        found = true
-        break
-      }
-      idx++
-    }
-    if (!found || idx <= 0) return 0
-    const k = Math.ceil(idx / 2)
-    return idx % 2 === 1 ? k : -k
-  })
+  const store = useStoreApi()
+  const layoutVersion = useContext(GraphLayoutVersionContext)
+  const railIndex = useStore((s) => getRailIndex(s.edges, id))
 
   const { path, labelX, labelY } = useMemo(() => {
     const sDir = posOf(sourcePosition)
@@ -100,38 +221,19 @@ export function GraphSmartEdge(props: EdgeProps) {
     const y1 = Math.max(sourceY, targetY)
     const margin = 48 + Math.abs(railIndex) * 16
 
+    const snap = getFlowObstacleCache(store)
+    const sourceBox = snap.boxById.get(source)
+    const targetBox = snap.boxById.get(target)
     const obstacles: Box[] = []
-    let sourceBox: Box | undefined
-    let targetBox: Box | undefined
     let bandHit = false
-    // 仅在存在循环体子节点（parentId）时才按需构建父节点查找表，避免在千节点主图中每条边重复 new Map
-    let byId: Map<string, (typeof nodes)[number]> | undefined
-    const absolute = (n: (typeof nodes)[number]): { x: number; y: number } => {
-      if (!n.parentId) return n.position
-      byId ??= new Map(nodes.map((item) => [item.id, item]))
-      const parent = byId.get(n.parentId)
-      if (!parent) return n.position
-      const at = absolute(parent)
-      return { x: at.x + n.position.x, y: at.y + n.position.y }
-    }
 
-    for (const n of nodes) {
-      if (n.hidden) continue
-      // 注释虚线框仅展示，不参与绕障碰撞（否则边会贴框绕行出 U 勾）
-      if (isAnnotationNode(n)) continue
-      const box = nodeBox(n, absolute(n))
-      if (n.id === source) {
-        sourceBox = box
-        continue
-      }
-      if (n.id === target) {
-        targetBox = box
-        continue
-      }
+    for (const item of snap.nodes) {
+      if (item.id === source || item.id === target) continue
+      const box = item.box
       // 非回边只需收集水平走廊范围内的节点，跳过全图其余列节点
       if (!isBack && (box.right < x0 - margin || box.left > x1 + margin)) continue
       // 循环体内的边在所在容器的框内走，容器本身不是障碍
-      if (isInsideContainer(source, n.id) || isInsideContainer(target, n.id)) continue
+      if (isInsideContainer(source, item.id) || isInsideContainer(target, item.id)) continue
       if (!(box.right < x0 || box.left > x1 || box.bottom < y0 || box.top > y1)) {
         bandHit = true
       }
@@ -177,7 +279,8 @@ export function GraphSmartEdge(props: EdgeProps) {
       labelY: routed.labelY,
     }
   }, [
-    nodes,
+    store,
+    layoutVersion,
     source,
     target,
     sourceX,

@@ -172,9 +172,9 @@ func TestAPIStartTaskKeepsPolicy(t *testing.T) {
 	c := newClient(t, startTestRuntime(t), "")
 	var rec engine.Receipt
 	c.call(http.MethodPost, "/tasks", `{"GraphID":"demo_code","Engine":"durable","Input":{"a":3,"b":8,"name":"Ada"},`+
-		`"Policy":{"FailPolicy":"continue","MaxAttempts":3,"RetryDelayMS":456}}`, http.StatusAccepted, &rec)
+		`"Policy":{"FailPolicy":"fail_fast","MaxAttempts":3,"RetryDelayMS":456}}`, http.StatusAccepted, &rec)
 	p := c.waitTask(rec.TaskID, graph.SUCCEEDED).Task.Policy
-	if p.FailPolicy != "continue" || p.MaxAttempts != 3 || p.RetryDelayMS != 456 {
+	if p.FailPolicy != "fail_fast" || p.MaxAttempts != 3 || p.RetryDelayMS != 456 {
 		t.Fatalf("policy=%+v", p)
 	}
 }

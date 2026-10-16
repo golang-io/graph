@@ -68,6 +68,9 @@ func (s *Store) Save(ctx context.Context, def Definition) (*Definition, error) {
 	if !graph.ValidID(def.GraphID) {
 		return nil, fmt.Errorf("%w: GraphID required", engine.ErrInvalid)
 	}
+	if engineKind := strings.TrimSpace(def.Engine); engineKind != "" && !graph.ValidID(engineKind) {
+		return nil, fmt.Errorf("%w: invalid engine kind %q", engine.ErrInvalid, engineKind)
+	}
 	// 写库前校验画布文档（执行模式、轨道取值、便签几何）：读库经 ParseUI 严格校验，
 	// 写库不校验会把脏数据落盘，后续读取报 ErrCorrupt（stored state unavailable）。
 	if err := def.UI.Validate(); err != nil {
@@ -75,7 +78,7 @@ func (s *Store) Save(ctx context.Context, def Definition) (*Definition, error) {
 	}
 	// 校验与布局规整共用同一份解码参数（见 Registry.ValidateLayout），顶层节点只解码一次。
 	// 每个端点都要写明所在边；已不存在的端点（如删掉的 switch 分支）条目在这里清除，不进入新版本。
-	_, layout, err := s.nodes.ValidateLayout(def.Graph, def.UI.Layout)
+	layout, err := s.nodes.ValidateLayout(def.Graph, def.UI.Layout)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", engine.ErrInvalid, err)
 	}
@@ -122,6 +125,7 @@ func (s *Store) Save(ctx context.Context, def Definition) (*Definition, error) {
 				}
 			}
 			row.RowID, row.Version = "", row.Version+1
+			row.Label = def.Label
 			row.Graph, row.UI = def.Graph, def.UI
 			row.Graph.GraphVersion = row.Version
 			row.CreatedAt = row.UpdatedAt
@@ -203,7 +207,7 @@ func (s *Store) List(ctx context.Context) ([]Definition, error) {
 // Delete 标记当前图为删除；版本快照与已有 Task 继续保留。
 func (s *Store) Delete(ctx context.Context, graphID string) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		row, err := s.latest(tx, graphID)
+		row, err := s.latest(engine.Locking(tx), graphID)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return engine.ErrNotFound
 		}
@@ -282,7 +286,7 @@ func (s *Store) SetEngine(ctx context.Context, graphID, kind string) (*Definitio
 	}
 	var row *Definition
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		latest, err := s.latest(tx, graphID)
+		latest, err := s.latest(engine.Locking(tx), graphID)
 		if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && latest.Deleted) {
 			return engine.ErrNotFound
 		}

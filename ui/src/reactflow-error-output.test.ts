@@ -7,11 +7,11 @@ import { GraphNodeRegistryProvider } from './GraphNodeRegistryContext'
 import { createGraphNodePackFromCatalog } from './node-spec'
 
 const pack = createGraphNodePackFromCatalog('test', [
-  {ID: '__INNER__.stop_error', Name: 'Stop', Endpoints: {Inputs: ['In'], Outputs: ['Error']}},
+  {ID: '__INNER__.stop_error', Name: 'Stop', Endpoints: {Inputs: ['In']}},
 ])
 
-describe('React Flow static error output', () => {
-  it('renders stop_error error handle once', () => {
+describe('React Flow stop_error terminal node', () => {
+  it('renders stop_error without output handles', () => {
     const html = renderToString(createElement(ReactFlowProvider, null,
       createElement(GraphNodeRegistryProvider, {registry: pack.registry, children:
         createElement(StepNodeView, {
@@ -29,6 +29,6 @@ describe('React Flow static error output', () => {
           positionAbsoluteY: 0,
         }),
       })))
-    expect(html.match(/data-handleid="Error"/g)).toHaveLength(1)
+    expect(html.match(/data-handleid="Error"/g)).toBeNull()
   })
 })

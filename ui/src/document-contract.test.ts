@@ -29,7 +29,7 @@ describe('author document boundary', () => {
   it('preserves Graph.InputSchema and Node.Inputs across edits', () => {
     const base: GraphUI = {
       Graph: {
-        InputSchema: { type: 'object', required: ['q'], properties: { q: {} }, additionalProperties: false },
+        InputSchema: { type: 'object', required: ['q'], properties: { q: { type: 'string' } }, additionalProperties: false },
         Nodes: [
           {ID: 'a', Kind: 'template', Inputs: {
             q: {From: '$input', Field: 'q'},

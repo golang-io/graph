@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/golang-io/graph"
 	"github.com/golang-io/graph/engine"
 	"github.com/golang-io/graph/node/builtin"
+	"github.com/google/jsonschema-go/jsonschema"
 	"gorm.io/gorm"
 )
 
@@ -314,12 +316,6 @@ func runAll(t *testing.T, open OpenDB, build engine.Builder, base engine.TaskPol
 		if !found {
 			t.Fatal("stored Run.Outputs truncated")
 		}
-		// Watch 轮询用只读指纹列的 LoadFingerprint 判断变化，结果必须与完整快照的指纹一致，
-		// 否则订阅者会漏推或重复推送。
-		fp, err := engine.LoadFingerprint(e.db, id)
-		if err != nil || fp != engine.Fingerprint(s) {
-			t.Fatalf("LoadFingerprint = %q, %v; want %q", fp, err, engine.Fingerprint(s))
-		}
 	})
 
 	scenario(t, "Switch", func(t *testing.T) {
@@ -335,16 +331,29 @@ func runAll(t *testing.T, open OpenDB, build engine.Builder, base engine.TaskPol
 		eq(t, s.Task.Output, map[string]any{"tag": "hi"})
 		s = e.done(e.start(g, map[string]any{"score": 10}, base), graph.SUCCEEDED)
 		eq(t, s.Task.Output, map[string]any{"tag": "lo"})
+
+		// switch 后若误接 merge(all)，当唯一激活分支到达且无其他活跃分支时立即报 FAILED，不永久挂死在 WAITING。
+		stalledG := GI([]string{"score"}, []graph.Node{
+			In(N("gate", builtin.Switch, builtin.SwitchInput{Expr: "score >= 60"}), refs{"score": R(graph.InputSource, "score")}),
+			op("hi", OpInput{Set: map[string]any{"tag": "hi"}}), op("lo", OpInput{Set: map[string]any{"tag": "lo"}}),
+			N("m", builtin.Merge, builtin.MergeInput{Mode: "all"}),
+			end(nil)},
+			E("gate", "hi", "Case0"), E("gate", "lo", "Case1"), E("hi", "m"), E("lo", "m"), E("m", "finish"))
+		failed := e.done(e.start(stalledG, map[string]any{"score": 70}, base), graph.FAILED)
+		if !strings.Contains(failed.Task.Error, "merge (mode=all) cannot complete") {
+			t.Fatalf("error = %q", failed.Task.Error)
+		}
 	})
 
 	scenario(t, "MissingInput", func(t *testing.T) {
 		e := setup(t, open, build)
-		// finish 直接引用 hi.tag：走 false 分支时 hi 没有执行，finish 失败而不是读到空值。
+		// finish 直接引用 hi.tag：走 false 分支时 hi 没有执行，经 merge(any) 放行后 finish 失败而不是读到空值。
 		g := GI([]string{"score"}, []graph.Node{
 			In(N("gate", builtin.Switch, builtin.SwitchInput{Expr: "score >= 60"}), refs{"score": R(graph.InputSource, "score")}),
 			op("hi", OpInput{Set: map[string]any{"tag": "hi"}}), op("lo", OpInput{Set: map[string]any{"tag": "lo"}}),
+			N("m", builtin.Merge, builtin.MergeInput{Mode: "any"}),
 			end(refs{"tag": R("hi", "tag")})},
-			E("gate", "hi", "Case0"), E("gate", "lo", "Case1"), E("hi", "finish"), E("lo", "finish"))
+			E("gate", "hi", "Case0"), E("gate", "lo", "Case1"), E("hi", "m"), E("lo", "m"), E("m", "finish"))
 		s := e.done(e.start(g, map[string]any{"score": 10}, base), graph.FAILED)
 		if !strings.Contains(s.Task.Error, `input "tag" unavailable`) {
 			t.Fatalf("error = %q", s.Task.Error)
@@ -355,9 +364,10 @@ func runAll(t *testing.T, open OpenDB, build engine.Builder, base engine.TaskPol
 		e := setup(t, open, build)
 		g := G([]graph.Node{op("fork", OpInput{}),
 			op("l", OpInput{Set: map[string]any{"l": 1}, SleepMS: 20}), op("r", OpInput{Set: map[string]any{"r": 2}}),
+			N("m", builtin.Merge, builtin.MergeInput{Mode: "all"}),
 			tpl("join", refs{"l": R("l", "l"), "r": R("r", "r")}, kv("sum", "{{l}}+{{r}}")),
 			end(refs{"l": R("l", "l"), "r": R("r", "r"), "sum": R("join", "sum")})},
-			E("fork", "l"), E("fork", "r"), E("l", "join"), E("r", "join"), E("join", "finish"))
+			E("fork", "l"), E("fork", "r"), E("l", "m"), E("r", "m"), E("m", "join"), E("join", "finish"))
 		s := e.done(e.start(g, nil, base), graph.SUCCEEDED)
 		eq(t, s.Task.Output, map[string]any{"l": 1, "r": 2, "sum": "1+2"})
 		// 汇合后路径输出含 join。
@@ -394,12 +404,63 @@ func runAll(t *testing.T, open OpenDB, build engine.Builder, base engine.TaskPol
 		e := setup(t, open, build)
 		g := G([]graph.Node{op("f1", OpInput{}),
 			op("a", OpInput{}), op("a1", OpInput{Set: map[string]any{"a1": 1}}), op("a2", OpInput{Set: map[string]any{"a2": 2}}),
+			N("m1", builtin.Merge, builtin.MergeInput{Mode: "all"}),
 			op("aj", OpInput{Set: map[string]any{"aj": true}}), op("b", OpInput{Set: map[string]any{"b": 3}}),
+			N("m2", builtin.Merge, builtin.MergeInput{Mode: "all"}),
 			op("j", OpInput{}), end(refs{"a1": R("a1", "a1"), "a2": R("a2", "a2"), "aj": R("aj", "aj"), "b": R("b", "b")})},
-			E("f1", "a"), E("f1", "b"), E("a", "a1"), E("a", "a2"), E("a1", "aj"), E("a2", "aj"),
-			E("aj", "j"), E("b", "j"), E("j", "finish"))
+			E("f1", "a"), E("f1", "b"), E("a", "a1"), E("a", "a2"), E("a1", "m1"), E("a2", "m1"), E("m1", "aj"),
+			E("aj", "m2"), E("b", "m2"), E("m2", "j"), E("j", "finish"))
 		s := e.done(e.start(g, nil, base), graph.SUCCEEDED)
 		eq(t, s.Task.Output, map[string]any{"a1": 1, "a2": 2, "aj": true, "b": 3})
+	})
+
+	scenario(t, "PartialJoin", func(t *testing.T) {
+		e := setup(t, open, build)
+		// 同级 3 分支（a、b、c）：a、b 先在 m1(all) 局部汇合后执行 sideeffect，再与 c 在 m2(all) 汇合。
+		// sideeffect 只应执行 1 次，且可同时读取 a、b 的输出。
+		g := G([]graph.Node{
+			N("fork", builtin.Parallel, nil),
+			op("a", OpInput{Set: map[string]any{"va": 10}}),
+			op("b", OpInput{Set: map[string]any{"vb": 20}}),
+			op("c", OpInput{Set: map[string]any{"vc": 30}}),
+			N("m1", builtin.Merge, builtin.MergeInput{Mode: "all"}),
+			code("sideeffect", refs{"va": R("a", "va"), "vb": R("b", "vb")}, kv("ab", "va + vb")),
+			N("m2", builtin.Merge, builtin.MergeInput{Mode: "all"}),
+			end(refs{"ab": R("sideeffect", "ab"), "vc": R("c", "vc")}),
+		}, E("fork", "a"), E("fork", "b"), E("fork", "c"),
+			E("a", "m1"), E("b", "m1"), E("m1", "sideeffect"),
+			E("sideeffect", "m2"), E("c", "m2"), E("m2", "finish"))
+		s := e.done(e.start(g, nil, base), graph.SUCCEEDED)
+		eq(t, s.Task.Output, map[string]any{"ab": 30, "vc": 30})
+	})
+
+	scenario(t, "DynamicMergeMode", func(t *testing.T) {
+		e := setup(t, open, build)
+		// merge 静态 Mode=any，但通过上游动态绑定传入 Mode="all"，应等待 slow 分支完成。
+		m := In(N("m", builtin.Merge, builtin.MergeInput{Mode: "any"}), refs{"Mode": R("fork", "Mode")})
+		g := G([]graph.Node{
+			op("fork", OpInput{Set: map[string]any{"Mode": "all"}}),
+			op("fast", OpInput{Set: map[string]any{"f": 1}}),
+			op("slow", OpInput{Set: map[string]any{"s": 2}, SleepMS: 40}),
+			m,
+			end(refs{"f": R("fast", "f"), "s": R("slow", "s")}),
+		}, E("fork", "fast"), E("fork", "slow"), E("fast", "m"), E("slow", "m"), E("m", "finish"))
+		s := e.done(e.start(g, nil, base), graph.SUCCEEDED)
+		eq(t, s.Task.Output, map[string]any{"f": 1, "s": 2})
+	})
+
+	scenario(t, "MultipleEnds", func(t *testing.T) {
+		e := setup(t, open, build)
+		// 两条分支各自连向独立的 End 节点，全部完成后输出合并。
+		g := G([]graph.Node{
+			N("fork", builtin.Parallel, nil),
+			op("a", OpInput{Set: map[string]any{"a": 1}}),
+			op("b", OpInput{Set: map[string]any{"b": 2}, SleepMS: 20}),
+			In(N("end1", builtin.End, nil), refs{"a": R("a", "a")}),
+			In(N("end2", builtin.End, nil), refs{"b": R("b", "b")}),
+		}, E("fork", "a"), E("fork", "b"), E("a", "end1"), E("b", "end2"))
+		s := e.done(e.start(g, nil, base), graph.SUCCEEDED)
+		eq(t, s.Task.Output, map[string]any{"a": 1, "b": 2})
 	})
 
 	scenario(t, "MapReduce", func(t *testing.T) {
@@ -469,6 +530,86 @@ func runAll(t *testing.T, open OpenDB, build engine.Builder, base engine.TaskPol
 		}
 	})
 
+	scenario(t, "MapLargeIntegerPrecision", func(t *testing.T) {
+		e := setup(t, open, build)
+		// 验证 Map 多轮状态反序列化保持超过 2^53 的大整数与 int64 边界值精度（串行/并行、单元素/分块、嵌套对象）。
+		// Verify Map multi-round state decoding preserves int64 precision across 2^53±1, int64 bounds, chunks, and nested objects.
+		items := []any{
+			int64(9007199254740993),  // 2^53 + 1
+			int64(9007199254740995),  // 2^53 + 3
+			int64(-9007199254740993), // -(2^53 + 1)
+			int64(math.MaxInt64),
+			int64(math.MinInt64),
+			map[string]any{"id": int64(9007199254740993), "nested": []any{int64(9007199254740995)}},
+		}
+		body := graph.Graph{
+			InputSchema: graph.RunInputSchema(map[string]*jsonschema.Schema{
+				builtin.MapItemField:  graph.AnyValueSchema(),
+				builtin.MapIndexField: {Type: "integer"},
+			}),
+			Nodes: []graph.Node{
+				N("s", builtin.Start, nil),
+				end(refs{
+					"Value": R(graph.InputSource, builtin.MapItemField),
+					"Index": R(graph.InputSource, builtin.MapIndexField),
+				}),
+			},
+			Edges: []graph.Edge{E("s", "finish")},
+		}
+		for _, tc := range []struct {
+			chunk       int
+			maxParallel int
+			want        []any
+		}{
+			{
+				chunk:       1,
+				maxParallel: 1,
+				want: []any{
+					map[string]any{"Index": int64(0), "Value": items[0]},
+					map[string]any{"Index": int64(1), "Value": items[1]},
+					map[string]any{"Index": int64(2), "Value": items[2]},
+					map[string]any{"Index": int64(3), "Value": items[3]},
+					map[string]any{"Index": int64(4), "Value": items[4]},
+					map[string]any{"Index": int64(5), "Value": items[5]},
+				},
+			},
+			{
+				chunk:       1,
+				maxParallel: 2,
+				want: []any{
+					map[string]any{"Index": int64(0), "Value": items[0]},
+					map[string]any{"Index": int64(1), "Value": items[1]},
+					map[string]any{"Index": int64(2), "Value": items[2]},
+					map[string]any{"Index": int64(3), "Value": items[3]},
+					map[string]any{"Index": int64(4), "Value": items[4]},
+					map[string]any{"Index": int64(5), "Value": items[5]},
+				},
+			},
+			{
+				chunk:       2,
+				maxParallel: 1,
+				want: []any{
+					map[string]any{"Index": int64(0), "Value": []any{items[0], items[1]}},
+					map[string]any{"Index": int64(2), "Value": []any{items[2], items[3]}},
+					map[string]any{"Index": int64(4), "Value": []any{items[4], items[5]}},
+				},
+			},
+		} {
+			g := graph.Graph{
+				InputSchema: graph.RunInputSchema(map[string]*jsonschema.Schema{"items": {Type: "array", Items: graph.AnyValueSchema()}}),
+				Nodes: []graph.Node{
+					N("s", builtin.Start, nil),
+					In(N("lp", builtin.Map, builtin.MapInput{Chunk: tc.chunk, MaxParallel: tc.maxParallel, Body: &body}),
+						refs{builtin.MapListField: R(graph.InputSource, "items")}),
+					end(refs{"Results": R("lp", builtin.MapResultsField)}),
+				},
+				Edges: []graph.Edge{E("s", "lp"), E("lp", "finish")},
+			}
+			s := e.done(e.start(g, map[string]any{"items": items}, base), graph.SUCCEEDED)
+			eq(t, s.Task.Output, map[string]any{"Results": tc.want})
+		}
+	})
+
 	scenario(t, "SubGraph", func(t *testing.T) {
 		e := setup(t, open, build)
 		e.graphs["child"] = GI([]string{"name"}, []graph.Node{
@@ -490,6 +631,37 @@ func runAll(t *testing.T, open OpenDB, build engine.Builder, base engine.TaskPol
 		}
 	})
 
+	scenario(t, "SnapshotOwnership", func(t *testing.T) {
+		e := setup(t, open, build)
+		g := graph.Graph{
+			InputSchema: graph.RunInputSchema(map[string]*jsonschema.Schema{"Obj": graph.AnyValueSchema()}),
+			Nodes: []graph.Node{
+				N("s", builtin.Start, nil),
+				end(refs{"Value": R(graph.InputSource, "Obj")}),
+			},
+			Edges: []graph.Edge{E("s", "finish")},
+		}
+		p := base
+		p.Debug = &engine.DebugOptions{Breakpoints: []string{"finish"}}
+		id := e.start(g, map[string]any{"Obj": map[string]any{"x": int64(1)}}, p)
+		a := e.waiting(id)
+		// 外部原地修改 Snapshot 返回的嵌套输入与节点名，不得影响后续快照与恢复后的执行结果（R03）。
+		a.Task.Input["Obj"].(map[string]any)["x"] = int64(999)
+		a.Task.Graph.Nodes[0].Name = "external-mutated"
+		b, err := e.eng.Snapshot(e.ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Task.Input["Obj"].(map[string]any)["x"] != int64(1) || b.Task.Graph.Nodes[0].Name == "external-mutated" {
+			t.Fatalf("snapshot mutated internal state: input=%v name=%q", b.Task.Input, b.Task.Graph.Nodes[0].Name)
+		}
+		if _, err := e.resume(id, engine.ResumeRequest{}); err != nil {
+			t.Fatal(err)
+		}
+		s := e.done(id, graph.SUCCEEDED)
+		eq(t, s.Task.Output, map[string]any{"Value": map[string]any{"x": int64(1)}})
+	})
+
 	scenario(t, "SubGraphFailure", func(t *testing.T) {
 		e := setup(t, open, build)
 		e.graphs["bad"] = G([]graph.Node{N("x", builtin.StopError, builtin.StopErrorInput{Message: "boom"}), end(nil)},
@@ -500,7 +672,10 @@ func runAll(t *testing.T, open OpenDB, build engine.Builder, base engine.TaskPol
 		e.graphs["needs"] = GI([]string{"name"}, []graph.Node{end(refs{"name": R(graph.InputSource, "name")})})
 		g = G([]graph.Node{N("sub", builtin.SubGraph, builtin.SubGraphInput{GraphID: "needs"}), end(nil)}, E("sub", "finish"))
 		s := e.done(e.start(g, nil, base), graph.FAILED)
-		if !strings.Contains(s.Task.Error, `"name" required`) {
+		// jsonschema-go 校验 required 时文案为 missing properties；保留对字段名 name 的断言。
+		hasName := strings.Contains(s.Task.Error, "name")
+		hasRequiredHint := strings.Contains(s.Task.Error, "required") || strings.Contains(s.Task.Error, "missing properties")
+		if !hasName || !hasRequiredHint {
 			t.Fatalf("error = %q", s.Task.Error)
 		}
 	})
@@ -516,29 +691,26 @@ func runAll(t *testing.T, open OpenDB, build engine.Builder, base engine.TaskPol
 		e.done(e.start(g, nil, p), graph.FAILED)
 	})
 
-	scenario(t, "ErrorEdge", func(t *testing.T) {
+	scenario(t, "StopError", func(t *testing.T) {
 		e := setup(t, open, build)
-		// stop_error 沿 error 出边继续。
+		// stop_error 是无出端点的终止报错节点，进入后直接使 Task 失败。
 		g := G([]graph.Node{
 			N("a", builtin.StopError, builtin.StopErrorInput{Message: "boom"}),
-			op("fix", OpInput{Set: map[string]any{"fixed": true}}),
-			end(refs{"fixed": R("fix", "fixed"), "error": R("a", graph.ErrorField)}),
-		}, E("a", "fix", graph.EndpointError), E("fix", "finish"))
-		s := e.done(e.start(g, nil, base), graph.SUCCEEDED)
-		eq(t, s.Task.Output, map[string]any{"error": "boom", "fixed": true})
+		})
+		s := e.done(e.start(g, nil, base), graph.FAILED)
+		if !strings.Contains(s.Task.Error, "boom") {
+			t.Fatalf("error = %q, want boom", s.Task.Error)
+		}
 	})
 
-	scenario(t, "FailPolicy", func(t *testing.T) {
+	scenario(t, "FailFast", func(t *testing.T) {
 		e := setup(t, open, build)
 		g := G([]graph.Node{op("fork", OpInput{}),
 			op("bad", OpInput{FailTimes: 99}), op("good", OpInput{Set: map[string]any{"g": 1}, SleepMS: 30}),
+			N("m", builtin.Merge, builtin.MergeInput{Mode: "all"}),
 			end(refs{"g": R("good", "g")})},
-			E("fork", "bad"), E("fork", "good"), E("bad", "finish"), E("good", "finish"))
+			E("fork", "bad"), E("fork", "good"), E("bad", "m"), E("good", "m"), E("m", "finish"))
 		e.done(e.start(g, nil, base), graph.FAILED)
-		p := base
-		p.FailPolicy = engine.FailContinue
-		s := e.done(e.start(g, nil, p), graph.SUCCEEDED)
-		eq(t, s.Task.Output, map[string]any{"g": 1})
 	})
 
 	scenario(t, "Cancel", func(t *testing.T) {

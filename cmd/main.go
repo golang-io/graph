@@ -13,10 +13,13 @@ import (
 	"log"
 	"net"
 	"net/http"
+	netpprof "net/http/pprof"
 	"os"
 	"os/signal"
 	"path"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"syscall"
 	"time"
 
@@ -38,7 +41,42 @@ func main() {
 	addr := flag.String("addr", ":8080", "监听地址")
 	data := flag.String("data", "./.data", "数据目录（demo 用本地 sqlite：graph.db，定义库与两个引擎共用）")
 	dist := flag.String("web", "", "前端静态目录（web/dist）；为空则自动探测 web/dist，探测不到退回内置简易页")
+	cpuprofile := flag.String("cpuprofile", "", "CPU pprof 采样输出文件路径（为空则不写文件）")
+	memprofile := flag.String("memprofile", "", "内存 heap pprof 采样输出文件路径（退出前写入，为空则不写文件）")
 	flag.Parse()
+
+	// 若指定了 -cpuprofile，启动进程级 CPU pprof 采样，退出时停止并落盘。
+	// Start process-wide CPU profiling when -cpuprofile is set, flushing on exit.
+	if *cpuprofile != "" {
+		f, err := os.Create(*cpuprofile)
+		if err != nil {
+			log.Fatalf("create cpuprofile %s: %v", *cpuprofile, err)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			_ = f.Close()
+			log.Fatalf("start cpuprofile: %v", err)
+		}
+		defer func() {
+			pprof.StopCPUProfile()
+			_ = f.Close()
+		}()
+	}
+	// 若指定了 -memprofile，在进程退出前触发 GC 并写入堆与分配采样文件。
+	// Write heap memory profile after GC on exit when -memprofile is set.
+	if *memprofile != "" {
+		defer func() {
+			f, err := os.Create(*memprofile)
+			if err != nil {
+				log.Printf("create memprofile %s: %v", *memprofile, err)
+				return
+			}
+			defer f.Close()
+			runtime.GC()
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				log.Printf("write memprofile: %v", err)
+			}
+		}()
+	}
 	if *dist == "" { // 自动探测：make build 产出 dist 后无需再传 -web
 		for _, cand := range []string{"web/dist", "cmd/web/dist"} {
 			if info, err := os.Stat(cand); err == nil && info.IsDir() {
@@ -81,6 +119,13 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", api.Handler(rt, "/api"))
+	// 挂载标准 net/http/pprof 端点，支持在线采集 CPU（/debug/pprof/profile）与内存（/debug/pprof/heap、/debug/pprof/allocs）。
+	// Register standard net/http/pprof handlers for live CPU and memory profiling.
+	mux.HandleFunc("/debug/pprof/", netpprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", netpprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", netpprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", netpprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", netpprof.Trace)
 	// 与 /api/ 同为全方法子树：更具体的 /api/ 优先，GET / 会和方法更窄的模式冲突。
 	if *dist != "" {
 		mux.Handle("/", spaHandler(*dist))

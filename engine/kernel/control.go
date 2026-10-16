@@ -32,7 +32,7 @@ func (st *state) onResume(ev Resume) error {
 	if action != "" && action != engine.DebugActionStep && action != engine.DebugActionContinue {
 		return reject(engine.ErrInvalid, "DebugAction %q", req.DebugAction)
 	}
-	if err := st.c.CheckDebug(req.Debug); err != nil {
+	if err := CheckDebug(st.c.reg, st.task.Graph, req.Debug); err != nil {
 		return &rejection{err: err}
 	}
 	t := st.task
@@ -49,7 +49,7 @@ func (st *state) onResume(ev Resume) error {
 		targets = targets[:min(1, len(targets))]
 	}
 	if req.Debug != nil {
-		t.Policy.Debug = req.Debug.Clone()
+		t.Policy.Debug, _ = req.Debug.Normalize()
 	}
 	switch action {
 	case engine.DebugActionStep:
@@ -70,7 +70,7 @@ func (st *state) onResume(ev Resume) error {
 			continue
 		}
 		r.WaitReason = ""
-		if err := st.proceed(r, st.c.Nodes[r.NodeID]); err != nil {
+		if err := st.proceed(r, st.c.node(r.NodeID)); err != nil {
 			return err
 		}
 	}

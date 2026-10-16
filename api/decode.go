@@ -13,13 +13,19 @@ import (
 	"github.com/golang-io/graph/internal/jsonx"
 )
 
+// maxRequestBodyBytes 限制单次 HTTP 请求体最大字节数（16 MiB），防止超大请求体耗尽进程内存。
+const maxRequestBodyBytes = 16 << 20
+
 // decodeRequest 读取请求体并经 jsonx.Strict 校验后解码；整数解码为 int64。
 // 键名与 Go 字段名一致，未声明的键（如 snake_case 的 graph_id）直接拒绝，不会被静默忽略。
 // optional 为 true 时允许空请求体（如不带参数的 resume / cancel）。解码失败返回 ErrInvalid。
 func decodeRequest(r *http.Request, target any, optional bool) error {
-	raw, err := io.ReadAll(r.Body)
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodyBytes+1))
 	if err != nil {
 		return fmt.Errorf("%w: read body: %v", engine.ErrInvalid, err)
+	}
+	if len(raw) > maxRequestBodyBytes {
+		return fmt.Errorf("%w: request body exceeds %d bytes", engine.ErrInvalid, maxRequestBodyBytes)
 	}
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		if optional {

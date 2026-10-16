@@ -67,7 +67,7 @@ func (r *Registry) spec(id string) (NodeSpec, bool) {
 }
 
 // decodeNode 按节点实例一次查出种类描述并解码字面量参数，返回冻结的静态参数 cfg。
-// NodeEndpoints、JoinMode、Outputs、OutputRule、CleanEndpointSides 与整图校验共用同一入口，
+// NodeEndpoints、JoinMode、CheckOutput、CleanEndpointSides 与整图校验共用同一入口，
 // 错误文案在此统一，调用方不再各自拼接“未注册 / 参数”错误。
 func (r *Registry) decodeNode(n graph.Node) (NodeSpec, any, error) {
 	spec, ok := r.spec(n.Kind)
@@ -141,9 +141,7 @@ func validateSpecFields(spec NodeSpec) error {
 			return fmt.Errorf("invalid default input %q", name)
 		}
 	}
-	if _, err := mergeOutputsByEndpoint(spec.OutputsByEndpoint); err != nil {
-		return err
-	}
+	owner := map[string]string{}
 	for ep, schema := range spec.OutputsByEndpoint {
 		if ep != EndpointPayloadDefault && !graph.ValidID(ep) {
 			return fmt.Errorf("invalid OutputsByEndpoint key %q", ep)
@@ -155,6 +153,10 @@ func validateSpecFields(spec NodeSpec) error {
 			if !graph.ValidName(name) {
 				return fmt.Errorf("invalid output property %q on endpoint %q", name, ep)
 			}
+			if prev, ok := owner[name]; ok && prev != ep {
+				return fmt.Errorf("output field %q claimed by endpoints %q and %q", name, prev, ep)
+			}
+			owner[name] = ep
 		}
 	}
 	return nil

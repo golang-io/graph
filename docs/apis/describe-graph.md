@@ -37,7 +37,7 @@ curl -s http://127.0.0.1:8080/api/graphs/demo_code
   "Graph": {
     "GraphID": "demo_code",
     "GraphVersion": 1,
-    "InputSchema": {"type": "object", "required": ["a", "b", "name"], "properties": {"a": {}, "b": {}, "name": {}}, "additionalProperties": false},
+    "InputSchema": {"type": "object", "required": ["a", "b", "name"], "properties": {"a": {"type": "number"}, "b": {"type": "number"}, "name": {"type": "string"}}, "additionalProperties": false},
     "Nodes": [
       {"ID": "start", "Kind": "__INNER__.start", "Name": "开始"},
       {"ID": "calc", "Kind": "code", "Name": "计算",

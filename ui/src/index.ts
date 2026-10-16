@@ -34,6 +34,11 @@ export {
   type GraphNodePropsPanelProps,
   type GraphNodePropsValue,
 } from './GraphNodePropsPanel'
+export {
+  GraphNodeContextMenu,
+  type GraphNodeContextMenuItem,
+  type GraphNodeContextMenuProps,
+} from './GraphNodeContextMenu'
 export { GraphWorkbench, type GraphWorkbenchProps } from './GraphWorkbench'
 export { GraphPaletteGroup, type GraphPaletteGroupProps } from './GraphPaletteGroup'
 export { GraphPalette, type GraphPaletteProps } from './GraphPalette'
@@ -91,13 +96,35 @@ export {
   type Side,
 } from './orient'
 export { NodeInputsFields } from './NodeInputsFields'
-export { GraphInputsFields } from './GraphInputsFields'
+export { GraphInputsFields, type GraphInputsMode, type GraphInputsTab } from './GraphInputsFields'
 export {
+  ANY_VALUE_SCHEMA,
+  RUN_INPUT_TYPES,
+  buildRunInputJsonTemplate,
+  collectRunInputValues,
+  defaultRunInputSchema,
+  examplePlaceholderText,
+  formatRunInputJsonObject,
+  formatRunInputValue,
+  mergeUndeclaredRunInputFields,
+  parseRunInputJsonObject,
+  parseRunInputValue,
+  placeholderForSchema,
   runInputFieldsFromSchema,
   runInputNames,
   runInputSchemaFromFields,
+  schemaTypeLabel,
+  type ParseRunInputJsonResult,
   type RunInputRow,
+  type RunInputType,
 } from './run-input-schema'
+export {
+  formatRunInputIssues,
+  validateRunInput,
+  type RunInputValidationIssue,
+  type RunInputValidationResult,
+} from './run-input-validate'
+export { SchemaEditor } from './SchemaEditor'
 export {
   GRAPH_ERROR_FIELD,
   ENDPOINT_PAYLOAD_DEFAULT,

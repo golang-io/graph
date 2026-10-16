@@ -1,4 +1,4 @@
-// Package kernel 是所有执行引擎共用的执行语义：Compile 把图编译为只读索引，Apply 把一个事件应用到
+// Package kernel 是所有执行引擎共用的执行语义：Apply 把一个事件应用到
 // 一个 Task 的当前状态上，返回状态改动（Changes）与需要引擎执行的命令（Command）。
 //
 // 内核是纯函数：不打开数据库连接、不调用 gorm 与 database/sql、不读时钟（时间由 Env.Now 提供）；

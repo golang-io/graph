@@ -7,7 +7,7 @@ import (
 	"github.com/golang-io/graph"
 )
 
-// 默认端点本地名：入边落在 In，普通出边从 Out 出发；其余出口本地名即分支语义标签（Case0/Error）。
+// 默认端点本地名：入边落在 In，普通出边从 Out 出发；其余出口本地名即分支语义标签（Case0..Case15）。
 // Default endpoint local names for ordinary nodes.
 const (
 	DefaultInput  = "In"
@@ -16,7 +16,7 @@ const (
 
 // EndpointSpec 声明节点端点集合（Inputs/Outputs）。
 // 在 NodeSpec 上表示种类级固定端点上限（见 Registry.Endpoints）；
-// 在 Validated.Endpoints / Compiled.Endpoints 与 Registry.NodeEndpoints 上表示节点实例实际启用的端点。
+// 在 Registry.NodeEndpoints 上表示节点实例实际启用的端点。
 // 拓扑校验只读两条属性：Inputs 为空是入口节点，Outputs 为空是终止节点。
 // 图不允许成环；遍历用 map 节点的内嵌循环体（子图），多入边的汇合方式见 JoinModeDeclarer。
 //
@@ -26,20 +26,16 @@ type EndpointSpec struct {
 	Outputs []string `json:"Outputs,omitempty"`
 }
 
-// isErrorEndpoint 报告本地端点名是否为失败捕获出口。
-// isErrorEndpoint reports whether ep is the error output endpoint.
-func isErrorEndpoint(ep string) bool { return ep == graph.EndpointError }
-
 // isDefaultOutput 报告本地端点名是否为默认出口。
 // isDefaultOutput reports whether ep is the default output endpoint.
 func isDefaultOutput(ep string) bool { return ep == DefaultOutput }
 
 // isReturnableOutput 报告 ep 是否允许经 NodeOutput.Endpoint 显式返回：
-// 必须是实例已启用的分支出口，不含 Error 与默认 Out（后两者由空 Endpoint 与错误边表达）。
+// 必须是实例已启用的分支出口，不含默认 Out（默认 Out 由空 Endpoint 表达）。
 //
 // isReturnableOutput reports whether ep may be explicitly returned in NodeOutput.Endpoint.
 func (e EndpointSpec) isReturnableOutput(ep string) bool {
-	if isErrorEndpoint(ep) || isDefaultOutput(ep) {
+	if isDefaultOutput(ep) {
 		return false
 	}
 	return slices.Contains(e.Outputs, ep)
@@ -51,19 +47,9 @@ func (e EndpointSpec) IsTerminal() bool { return len(e.Outputs) == 0 }
 // IsEntry 报告是否为入口节点（无输入端点）。
 func (e EndpointSpec) IsEntry() bool { return len(e.Inputs) == 0 }
 
-// Endpoints 返回种类注册时声明的固定端点上限（Register 已校验，同一种类的实例完全相同）。
-// 种类未注册时 ok=false。返回值是副本，调用方可以持有。
-func (r *Registry) Endpoints(kind string) (EndpointSpec, bool) {
-	spec, ok := r.spec(kind)
-	if !ok {
-		return EndpointSpec{}, false
-	}
-	return EndpointSpec{Inputs: slices.Clone(spec.Endpoints.Inputs), Outputs: slices.Clone(spec.Endpoints.Outputs)}, true
-}
-
 // NodeEndpoints 返回节点实例实际拥有的端点：入口为种类声明的 Inputs；出口为参数声明的启用出口
 // （ActiveOutputsDeclarer，如 switch 配置中的分支），未声明时为种类全部 Outputs。
-// 拓扑校验（Validate）、画布句柄校验（CleanEndpointSides）与编译索引（Validated.Endpoints）都按这组端点工作。
+// 拓扑校验（Validate）、画布句柄校验（CleanEndpointSides）与内核推进都按这组端点工作。
 // 种类未注册或参数无法解码时返回错误。返回值是副本。
 //
 // NodeEndpoints returns the endpoints a node instance actually has.
@@ -72,40 +58,38 @@ func (r *Registry) NodeEndpoints(n graph.Node) (EndpointSpec, error) {
 	if err != nil {
 		return EndpointSpec{}, err
 	}
-	return spec.resolveEndpoints(n.ID, cfg)
+	eps, err := spec.resolveEndpoints(n.ID, cfg)
+	if err != nil {
+		return EndpointSpec{}, err
+	}
+	return EndpointSpec{
+		Inputs:  slices.Clone(eps.Inputs),
+		Outputs: slices.Clone(eps.Outputs),
+	}, nil
 }
 
 // resolveEndpoints 按已解码参数结构体 cfg 算出实例实际启用的端点（见 NodeEndpoints）。
-// ActiveOutputs 未声明（返回 nil）时启用种类全部出口；否则必须为种类出口的子集且无重复，
-// 否则返回错误。
+// ActiveOutputs 未声明（返回 nil）时直接复用种类只读切片；否则校验必须为种类出口的子集且无重复。
 //
 // resolveEndpoints computes the active endpoints for a node instance from its decoded parameter struct.
 func (s NodeSpec) resolveEndpoints(nodeID string, cfg any) (EndpointSpec, error) {
-	active := EndpointSpec{Inputs: slices.Clone(s.Endpoints.Inputs), Outputs: slices.Clone(s.Endpoints.Outputs)}
 	d, ok := cfg.(ActiveOutputsDeclarer)
 	if !ok {
-		return active, nil
+		return s.Endpoints, nil
 	}
 	declared := d.ActiveOutputs()
 	if declared == nil {
-		return active, nil
+		return s.Endpoints, nil
 	}
-	allowed := make(map[string]bool, len(s.Endpoints.Outputs))
-	for _, ep := range s.Endpoints.Outputs {
-		allowed[ep] = true
-	}
-	seen := make(map[string]bool, len(declared))
-	for _, ep := range declared {
-		if !allowed[ep] {
+	for i, ep := range declared {
+		if !slices.Contains(s.Endpoints.Outputs, ep) {
 			return EndpointSpec{}, fmt.Errorf("graph: node %q enables unknown output %q", nodeID, ep)
 		}
-		if seen[ep] {
+		if slices.Contains(declared[:i], ep) {
 			return EndpointSpec{}, fmt.Errorf("graph: node %q enables duplicate output %q", nodeID, ep)
 		}
-		seen[ep] = true
 	}
-	active.Outputs = slices.Clone(declared)
-	return active, nil
+	return EndpointSpec{Inputs: s.Endpoints.Inputs, Outputs: declared}, nil
 }
 
 // JoinMode 返回节点实例声明的汇合方式：参数结构体实现 JoinModeDeclarer 时取其返回值（merge 的 Mode），

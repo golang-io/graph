@@ -17,8 +17,7 @@ import (
 //     失联超过 MaxLost 次的锁 Task 后以执行失败（ActivityDone）交给内核；
 //   - 子 Task 已结束、父 Run 仍在等待它（Awaited 为 true）：补发 ChildDone（提交后、投递 NotifyParent 前进程退出）；
 //   - 子 Task 未结束、父 Run 已不再等待它（Awaited 为 false）：补发 Cancel（提交后、投递 CancelChild 前进程退出）；
-//     两项都只查询 tb_graph_task，父子之间的等待关系只由子 Task 的 Awaited 表示；
-//   - 本进程编译结果表 byTask 中已不再执行的 Task：删除条目（只清理内存，不写库）。
+//     两项都只查询 tb_graph_task，父子之间的等待关系只由子 Task 的 Awaited 表示。
 // 补发与正常投递可能重复，两者都是幂等的；ChildDone 只补发结束时间早于一个租约时长的子 Task，减少与正常投递的重复。
 
 // recoverBatch 是恢复扫描每次查询读取的行数；按主键分页读完。
@@ -27,42 +26,7 @@ const recoverBatch = 500
 // recoverOnce 执行一轮恢复扫描，返回各项遇到的错误（不因一项失败而跳过其他项）。
 // 引擎关闭（stop 已取消）后各项在处理下一行前退出：剩余的行状态不变，由下一轮扫描（本进程重启后或其他进程）处理。
 func (e *Engine) recoverOnce() error {
-	return errors.Join(e.reclaimExpired(), e.redeliverChildDone(), e.redeliverCancel(), e.pruneCompiled())
-}
-
-// pruneCompiled 删除 byTask 中已不再执行的 Task：已由其他进程写入终态、或事务回滚后从未插入的 Task。
-// 按 recoverBatch 分批查询仍处于 PENDING / RUNNING / WAITING 的 TaskID，不在结果中的条目删除。
-// 只读不写，查询失败时保留条目、下一轮再试。
-//
-// pruneCompiled drops byTask entries whose task is no longer live in the database.
-func (e *Engine) pruneCompiled() error {
-	var ids []any
-	e.byTask.Range(func(k, _ any) bool {
-		ids = append(ids, k)
-		return true
-	})
-	for start := 0; start < len(ids); start += recoverBatch {
-		if e.stopping() {
-			return nil
-		}
-		chunk := ids[start:min(start+recoverBatch, len(ids))]
-		var live []string
-		err := e.cfg.DB.Model(&engine.Task{}).Where(clause.IN{Column: engine.Col("TaskID"), Values: chunk}).
-			Where(engine.StatusIn(engine.Live...)).Pluck("TaskID", &live).Error
-		if err != nil {
-			return fmt.Errorf("durable: prune compiled: %w", err)
-		}
-		keep := make(map[string]bool, len(live))
-		for _, id := range live {
-			keep[id] = true
-		}
-		for _, id := range chunk {
-			if !keep[id.(string)] {
-				e.byTask.Delete(id)
-			}
-		}
-	}
-	return nil
+	return errors.Join(e.reclaimExpired(), e.redeliverChildDone(), e.redeliverCancel())
 }
 
 // stopping 报告引擎是否正在关闭；恢复扫描据此提前结束。

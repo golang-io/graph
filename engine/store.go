@@ -182,47 +182,24 @@ func Snapshot(task Task, runs []Run) TaskSnapshot {
 	return TaskSnapshot{Task: task, Runs: runs}
 }
 
-// Fingerprint 由快照计算 Watch 判断变化用的指纹：Task 的状态与写回计数，各 Run 的状态、节点、Seq。
-func Fingerprint(s TaskSnapshot) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s:%d", s.Task.Status, s.Task.Version)
-	for _, r := range s.Runs {
-		fmt.Fprintf(&b, "|%s:%s:%s:%d", r.RunID, r.Status, r.NodeID, r.Seq)
+// sameWatchState 比较两次轮询快照的调度状态是否相同（Task 状态与写回计数、各 Run 的状态与节点位置）。
+// 直接比较结构体字段，不做字符串格式化拼接。
+func sameWatchState(a, b TaskSnapshot) bool {
+	if a.Task.TaskID == "" || a.Task.Version != b.Task.Version || a.Task.Status != b.Task.Status || len(a.Runs) != len(b.Runs) {
+		return false
 	}
-	return b.String()
-}
-
-// LoadFingerprint 在同一个只读事务中从表里计算 Task 当前的指纹，结果与 Fingerprint(LoadSnapshot(...)) 相同。
-// 只读取 Task 的 Status、Version 与各 Run 的 RunID、Status、NodeID、Seq，
-// 不读取图快照与 JSON 列（输入、输出、状态），Watch 轮询在 Task 无变化时只付出这两次小查询。
-//
-// LoadFingerprint reads only the fingerprint columns inside a single read-only transaction;
-// same result as Fingerprint(LoadSnapshot(...)).
-func LoadFingerprint(db *gorm.DB, taskID string) (string, error) {
-	var t Task
-	var runs []Run
-	err := readTx(db, func(tx *gorm.DB) error {
-		if err := tx.Select("Status", "Version").Where(map[string]any{"TaskID": taskID}).Take(&t).Error; err != nil {
-			return notFound(err, "task "+taskID)
+	for i := range a.Runs {
+		x, y := &a.Runs[i], &b.Runs[i]
+		if x.RunID != y.RunID || x.Status != y.Status || x.NodeID != y.NodeID || x.Seq != y.Seq {
+			return false
 		}
-		return tx.Select("RunID", "Status", "NodeID", "Seq").Where(map[string]any{"TaskID": taskID}).Find(&runs).Error
-	})
-	if err != nil {
-		return "", err
 	}
-	// 与 Snapshot 使用同一排序（Go 字节序），不依赖数据库排序规则。
-	// Same order as Snapshot, independent of the database collation.
-	SortRuns(runs)
-	return Fingerprint(TaskSnapshot{Task: t, Runs: runs}), nil
+	return true
 }
 
-// PollWatch 按 interval 轮询，指纹变化时推送一份完整快照；第一份总是推送。
-// 每轮先用 probe 只读取指纹（通常为 LoadFingerprint），与上次推送相同则跳过，变化时才调用 load 读取完整快照。
+// PollWatch 按 interval 轮询，状态变化时推送一份完整快照；第一份总是推送。
 // 推送终态快照后、ctx 结束时或读取失败时关闭 channel。
-//
-// PollWatch polls the fingerprint via probe and loads/sends a full snapshot only on change.
-func PollWatch(ctx context.Context, interval time.Duration,
-	probe func(context.Context) (string, error), load func(context.Context) (TaskSnapshot, error)) <-chan TaskSnapshot {
+func PollWatch(ctx context.Context, interval time.Duration, load func(context.Context) (TaskSnapshot, error)) <-chan TaskSnapshot {
 	if interval <= 0 {
 		interval = 200 * time.Millisecond
 	}
@@ -231,7 +208,7 @@ func PollWatch(ctx context.Context, interval time.Duration,
 		defer close(ch)
 		timer := time.NewTimer(0)
 		defer timer.Stop()
-		last := ""
+		var last TaskSnapshot
 		for first := true; ; first = false {
 			if !first {
 				timer.Reset(interval)
@@ -241,24 +218,14 @@ func PollWatch(ctx context.Context, interval time.Duration,
 				return
 			case <-timer.C:
 			}
-			if !first {
-				fp, err := probe(ctx)
-				if err != nil {
-					return
-				}
-				if fp == last {
-					continue
-				}
-			}
 			snap, err := load(ctx)
 			if err != nil {
 				return
 			}
-			fp := Fingerprint(snap)
-			if !first && fp == last {
+			if sameWatchState(last, snap) {
 				continue
 			}
-			last = fp
+			last = snap
 			select {
 			case ch <- snap:
 			case <-ctx.Done():

@@ -97,8 +97,10 @@ func DiffSnapshot(prev, next engine.TaskSnapshot) WatchEvent {
 	}
 	ev := WatchEvent{}
 	if !sameTask(prev.Task, next.Task) {
-		ev.Task = next.Task.Clone()
-		ev.Task.Graph = graph.Graph{}
+		// 先从局部副本排除图，避免深复制增量中不会发送的整张图。
+		task := next.Task
+		task.Graph = graph.Graph{}
+		ev.Task = task.Clone()
 	}
 	prevRuns := make(map[string]engine.Run, len(prev.Runs))
 	for _, r := range prev.Runs {

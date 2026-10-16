@@ -7,6 +7,15 @@ import {
   nodeDeclaredOutput,
   schemaPropertyNames,
 } from './node-outputs'
+import {
+  buildRunInputJsonTemplate,
+  collectRunInputValues,
+  formatRunInputJsonObject,
+  formatRunInputValue,
+  mergeUndeclaredRunInputFields,
+  parseRunInputJsonObject,
+  parseRunInputValue,
+} from './run-input-schema'
 import type { GraphNodeSpec } from './node-spec'
 import type { GraphJSON } from './types'
 
@@ -55,7 +64,7 @@ describe('nodeDeclaredOutput', () => {
 
 describe('inputSourcesFor', () => {
   const graph: GraphJSON = {
-    InputSchema: { type: 'object', required: ['q'], properties: { q: {} }, additionalProperties: false },
+    InputSchema: { type: 'object', required: ['q'], properties: { q: { type: 'string' } }, additionalProperties: false },
     Nodes: [
       { ID: 'start', Kind: '__INNER__.start' },
       { ID: 'a', Kind: 'template', Inputs: { Outputs: { Value: [{ Key: 'r' }] } } },
@@ -80,5 +89,85 @@ describe('inputSourcesFor', () => {
   })
   it('offers only run inputs to the start entry node', () => {
     expect(inputSourcesFor(graph, 'start', () => undefined).map((s) => s.id)).toEqual(['$input'])
+  })
+})
+
+describe('run-input-schema value & JSON helpers', () => {
+  const declared = [
+    { name: 'items', required: true, schema: { type: 'array' as const, items: { type: 'string' } } },
+    { name: 'mode', schema: { type: 'string' as const } },
+    { name: 'seed', schema: { type: 'integer' as const } },
+  ]
+
+  it('parses and formats row values while preserving string vs JSON types', () => {
+    expect(parseRunInputValue('3')).toBe(3)
+    expect(parseRunInputValue('["a","b"]')).toEqual(['a', 'b'])
+    expect(parseRunInputValue('【"a"，"b"】')).toEqual(['a', 'b'])
+    expect(parseRunInputValue('fast')).toBe('fast')
+    expect(parseRunInputValue('"123"')).toBe('123')
+
+    expect(formatRunInputValue(['a', 'b'])).toBe('["a","b"]')
+    expect(formatRunInputValue('fast')).toBe('fast')
+    expect(formatRunInputValue('123')).toBe('"123"')
+    expect(formatRunInputValue('')).toBe('""')
+    expect(parseRunInputValue(formatRunInputValue('123'))).toBe('123')
+    expect(parseRunInputValue(formatRunInputValue(''))).toBe('')
+  })
+
+  it('parses complete JSON object into row values and round-trips back to JSON', () => {
+    const raw = '{\n  "items": ["a", "b"],\n  "mode": "fast",\n  "seed": 3\n}'
+    const res = parseRunInputJsonObject(raw)
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.values).toEqual({
+      items: '["a","b"]',
+      mode: 'fast',
+      seed: '3',
+    })
+    expect(collectRunInputValues(declared, res.values)).toEqual({
+      items: ['a', 'b'],
+      mode: 'fast',
+      seed: 3,
+    })
+    expect(JSON.parse(formatRunInputJsonObject(declared, res.values))).toEqual({
+      items: ['a', 'b'],
+      mode: 'fast',
+      seed: 3,
+    })
+  })
+
+  it('rejects non-object JSON or invalid syntax in multiline JSON mode', () => {
+    expect(parseRunInputJsonObject('[1, 2, 3]').ok).toBe(false)
+    expect(parseRunInputJsonObject('123').ok).toBe(false)
+    expect(parseRunInputJsonObject('{bad json').ok).toBe(false)
+    expect(parseRunInputJsonObject('   ')).toEqual({ ok: true, value: {}, values: {} })
+  })
+
+  it('builds template and merges undeclared valid keys', () => {
+    const tpl = buildRunInputJsonTemplate(declared, { seed: '7' })
+    expect(JSON.parse(tpl)).toEqual({
+      items: ['a', 'b', 'c'],
+      mode: 'Ada',
+      seed: 7,
+    })
+
+    const merged = mergeUndeclaredRunInputFields(declared, {
+      items: '["x"]',
+      extra_key: 'true',
+      extra_num: '42',
+      extra_str: 'hello',
+      '1invalid': '99',
+    })
+    expect(merged.map((f) => f.name)).toEqual([
+      'items',
+      'mode',
+      'seed',
+      'extra_key',
+      'extra_num',
+      'extra_str',
+    ])
+    expect(merged[3]?.schema).toEqual({ type: 'boolean' })
+    expect(merged[4]?.schema).toEqual({ type: 'integer' })
+    expect(merged[5]?.schema).toEqual({ type: 'string' })
   })
 })

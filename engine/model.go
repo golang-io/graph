@@ -2,7 +2,6 @@ package engine
 
 import (
 	"encoding/json"
-	"maps"
 	"time"
 
 	"github.com/golang-io/graph"
@@ -74,15 +73,16 @@ type Task struct {
 // TableName 固定表名。
 func (Task) TableName() string { return "tb_graph_task" }
 
-// Clone 复制 Task；map 与调试选项做浅层复制，供快照与推进写回使用。
+// Clone 深复制 Task（含图定义、嵌套输入输出与调试选项），供快照与推进写回使用，确保外部修改快照不影响内部执行。
 func (t *Task) Clone() *Task {
 	if t == nil {
 		return nil
 	}
 	out := *t
 	out.Policy.Debug = t.Policy.Debug.Clone()
-	out.Input = maps.Clone(t.Input)
-	out.Output = maps.Clone(t.Output)
+	out.Input = cloneMap(t.Input)
+	out.Output = cloneMap(t.Output)
+	out.Graph = t.Graph.Clone()
 	if t.FinishedAt != nil {
 		at := *t.FinishedAt
 		out.FinishedAt = &at
@@ -96,17 +96,47 @@ func (t *Task) Clone() *Task {
 // Outputs maps node ID → output name → value along one execution path.
 type Outputs map[string]map[string]any
 
-// Clone 复制两层 map；值本身按不可变对待，不做深拷贝。
+// Clone 深复制节点输出映射及其嵌套动态值。
 func (o Outputs) Clone() Outputs {
 	if o == nil {
 		return nil
 	}
 	out := make(Outputs, len(o))
 	for id, fields := range o {
-		out[id] = maps.Clone(fields)
+		out[id] = CloneMap(fields)
 	}
 	return out
 }
+
+// CloneMap 深复制动态键值映射及其嵌套切片与映射。
+func CloneMap(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = CloneValue(v)
+	}
+	return out
+}
+
+// CloneValue 深复制动态值中的嵌套 map[string]any 与 []any。
+func CloneValue(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		return CloneMap(val)
+	case []any:
+		out := make([]any, len(val))
+		for i, item := range val {
+			out[i] = CloneValue(item)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func cloneMap(m map[string]any) map[string]any { return CloneMap(m) }
 
 // WaitReason 说明 Run 为什么不在执行，是 Run.WaitReason 的取值，只在 WAITING 时非空。
 // 等待结束（子任务结果到达、调试放行）在处理对应事件的 Apply 内直接继续推进，不经过中间状态。
@@ -135,23 +165,18 @@ type Run struct {
 	RunID      string `gorm:"column:RunID;primaryKey;size:64" json:"RunID"`
 	TaskID     string `gorm:"column:TaskID;size:64;index:IdxRunTask,priority:1" json:"TaskID"`
 	EngineKind string `gorm:"column:EngineKind;size:32" json:"EngineKind"`
-	// ParentRunID / Slot：fork 产生的子 Run 指向父 Run；Slot 为出边 ID。
-	ParentRunID string `gorm:"column:ParentRunID;size:64;index:IdxRunParent" json:"ParentRunID,omitempty"`
-	Slot        string `gorm:"column:Slot;size:64" json:"Slot,omitempty"`
 
 	// 位置与数据。
 	NodeID string `gorm:"column:NodeID;size:64" json:"NodeID"`
-	// FromEdgeID 是 Run 进入当前节点经由的边；起始节点、汇合完成后进入汇合节点时为空。
+	// FromEdgeID 是 Run 进入当前节点经由的边；起始节点为空。
 	FromEdgeID string          `gorm:"column:FromEdgeID;size:64" json:"FromEdgeID,omitempty"`
 	Seq        int64           `gorm:"column:Seq" json:"Seq"`
 	Outputs    Outputs         `gorm:"column:Outputs;serializer:graphjson" json:"Outputs"`         // 本路径上各节点的输出
 	State      json.RawMessage `gorm:"column:State;serializer:graphjson" json:"State,omitempty"`   // 当前节点访问中 Execute 返回的状态
 	Output     map[string]any  `gorm:"column:Output;serializer:graphjson" json:"Output,omitempty"` // 到达 end 时的输出
 
-	// 汇合进度，只在父 Run 上使用。
-	JoinNodeID   string             `gorm:"column:JoinNodeID;size:64" json:"JoinNodeID,omitempty"`          // 子 Run 进入该节点即视为到达
-	LiveChildren int                `gorm:"column:LiveChildren" json:"LiveChildren,omitempty"`              // 尚未结束的子 Run 数
-	Arrivals     map[string]Outputs `gorm:"column:Arrivals;serializer:graphjson" json:"Arrivals,omitempty"` // Slot → 到达时的节点输出
+	// Arrivals 记录 Merge(all) 节点已到达入边的节点输出（入边 ID → Outputs）。
+	Arrivals map[string]Outputs `gorm:"column:Arrivals;serializer:graphjson" json:"Arrivals,omitempty"`
 
 	// 调度。
 	Status      graph.StatusCode `gorm:"column:Status;size:16;index:IdxRunTask,priority:2" json:"Status"`
@@ -167,14 +192,17 @@ type Run struct {
 // TableName 固定表名。
 func (Run) TableName() string { return "tb_graph_run" }
 
-// Clone 复制 Run；所有 map / 切片做一层复制，避免后续推进修改已记录的实体新值。
+// Clone 深复制 Run（含 Outputs、Output、State 与 Arrivals）。
 func (r *Run) Clone() *Run {
 	if r == nil {
 		return nil
 	}
 	out := *r
 	out.Outputs = r.Outputs.Clone()
-	out.Output = maps.Clone(r.Output)
+	out.Output = cloneMap(r.Output)
+	if r.State != nil {
+		out.State = append(json.RawMessage(nil), r.State...)
+	}
 	if r.Arrivals != nil {
 		out.Arrivals = make(map[string]Outputs, len(r.Arrivals))
 		for slot, outs := range r.Arrivals {

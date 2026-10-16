@@ -1,113 +1,187 @@
 package kernel
 
 import (
+	"maps"
+
 	"github.com/golang-io/graph"
 	"github.com/golang-io/graph/engine"
 	"github.com/golang-io/graph/node"
 )
 
-// 本文件收拢 fork / 汇合推进：子 Run 派生、到达汇合点、落选分支跳过与汇合进入。
-// 节点执行、子任务派发、失败与结束仍在 progress.go；导航计算（汇合点查找、输出合并）在 nav.go。
-// 拆分只为阅读分组，不改变语义。
+// 本文件收拢扇出（fork）与多入边汇合（Merge）推进：
+//   - 节点命中多条出边时，为每条出边派生一条分支 Run 并逐条向目标节点推进；
+//   - 目标节点为多入边 Merge 节点时，按该节点自身的入边就绪状态与 Mode（any / all）门控：
+//     all 模式等待该节点的全部入边到达后合并输出并执行一次；
+//     any 模式在首条入边到达时立即执行，并跳过仅通向该 Merge 的其余在途分支，后续迟到入边直接忽略。
 
-// fork 让 r 转为 WAITING(join)，为每条出边插入一个子 Run。
-// 汇合点为各分支共同到达的最近节点。
+// fork 在节点命中多条出边时为每条出边创建分支 Run 并逐条进入目标节点。
+// 先将全部分支 Run 置入状态表，再依次推进，确保内联分支同步到达终点或触发 Merge(any) 时能完整感知同批兄弟分支。
 func (st *state) fork(r *engine.Run, outs []graph.Edge) error {
-	r.Status, r.WaitReason = graph.WAITING, engine.WaitJoin
-	r.JoinNodeID = st.c.JoinTarget(outs)
-	r.LiveChildren, r.Arrivals = len(outs), nil
+	r.Status = graph.SUCCEEDED
 	st.save(r)
-	for _, e := range outs {
-		// 每个分支复制一份父 Run 的节点输出，分支内的写入互不影响。
-		child := st.branch(r, e.ID, r.Outputs.Clone())
-		if err := st.enter(child, e.ToNode(), e.ID); err != nil {
-			return err
+	children := make([]*engine.Run, len(outs))
+	for i, e := range outs {
+		children[i] = st.branch(r, e, maps.Clone(r.Outputs))
+	}
+	for i, e := range outs {
+		if graph.IsTerminal(st.task.Status) || children[i].Status != graph.PENDING {
+			continue
 		}
-		// 分支已让 Task 结束（fail_fast）或 any 汇合已完成时，不再派发后续分支；
-		// 此时父 Run 已离开 WAITING(join)，未派发分支的计数不再使用。
-		if graph.IsTerminal(st.task.Status) || r.Status != graph.WAITING || r.WaitReason != engine.WaitJoin {
-			return nil
+		if err := st.enter(children[i], e.ToNode(), e.ID); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// branch 新建 p 的子 Run，outs 为子 Run 的初始节点输出（调用方已复制）。
-func (st *state) branch(p *engine.Run, slot string, outs engine.Outputs) *engine.Run {
+// branch 新建从父 Run p 沿出边 e 派生的分支 Run，outs 为分支初始节点输出（调用方已克隆）。
+func (st *state) branch(p *engine.Run, e graph.Edge, outs engine.Outputs) *engine.Run {
 	if outs == nil {
 		outs = engine.Outputs{}
 	}
 	child := &engine.Run{
 		RunID: st.env.newID(), TaskID: p.TaskID, EngineKind: p.EngineKind,
-		ParentRunID: p.RunID, Slot: slot, NodeID: p.NodeID,
+		NodeID: e.ToNode(), FromEdgeID: e.ID,
 		Outputs: outs, Status: graph.PENDING, CreatedAt: st.now,
 	}
 	st.insert(child)
 	return child
 }
 
-// arrive 处理子 Run r 到达父 Run p 的汇合点。all 汇合在全部子 Run 结束时只触发一次；
-// any 汇合只采纳第一个到达者，其余未结束的后代置为 SKIPPED。
-// 汇合方式取汇合节点的声明（Compiled.JoinModes），未声明时按 all 处理。
-func (st *state) arrive(p *engine.Run, r *engine.Run) error {
+// arrive 处理 Run r 经由入边 r.FromEdgeID 到达多入边汇合节点（Merge）。
+//   - 若该汇合节点此前已被触发（any 模式下首条边已放行），当前分支直接置为 SKIPPED；
+//   - 若是首条到达该节点的入边：解析有效 Mode（含上游动态绑定与调试注入），
+//     any 模式立即跳过其余仅通向该节点的分支并执行本节点，all 模式进入 WAITING(join) 等待其余入边；
+//   - 若已有 WAITING(join) 的 Run 在等待该节点：登记本条入边的输出，全部入边到齐后合并输出并执行一次该节点。
+func (st *state) arrive(r *engine.Run, inEdges []graph.Edge) error {
+	joinID := r.NodeID
+	via := r.FromEdgeID
+	if st.hasTriggered(joinID, r.RunID) {
+		r.NodeID = edgeSourceNode(inEdges, via, r.NodeID)
+		st.skip(r)
+		return st.ended(r)
+	}
+	waiter := st.findWaitingJoin(joinID, r.RunID)
+	if waiter == nil {
+		if st.resolveJoinMode(joinID, r.Outputs) == node.JoinAny {
+			st.skipLosers(joinID, r.RunID)
+			return st.visit(r)
+		}
+		r.Status, r.WaitReason = graph.WAITING, engine.WaitJoin
+		r.Arrivals = map[string]engine.Outputs{via: maps.Clone(r.Outputs)}
+		st.save(r)
+		return nil
+	}
+
+	waiter.Arrivals = maps.Clone(waiter.Arrivals)
+	if waiter.Arrivals == nil {
+		waiter.Arrivals = map[string]engine.Outputs{}
+	}
+	waiter.Arrivals[via] = maps.Clone(r.Outputs)
+	st.save(waiter)
+
+	// 后续到达的分支已将输出交由 waiter 汇合，自身的 NodeID 保持在入边来源节点，
+	// 避免在 waiter 尚未执行完成前出现 NodeID=joinID 且 Status=SUCCEEDED 的记录。
+	r.NodeID = edgeSourceNode(inEdges, via, r.NodeID)
 	r.Status = graph.SUCCEEDED
 	st.save(r)
-	p.LiveChildren--
-	st.save(p)
-	if st.c.JoinModes[p.JoinNodeID] == node.JoinAny {
-		p.Arrivals = map[string]engine.Outputs{r.Slot: r.Outputs}
-		st.skipDescendants(p, r.RunID)
-		p.LiveChildren = 0
-		return st.settle(p)
+
+	for _, edge := range inEdges {
+		if _, ok := waiter.Arrivals[edge.ID]; !ok {
+			return nil
+		}
 	}
-	if p.Arrivals == nil {
-		p.Arrivals = map[string]engine.Outputs{}
+	waiter.Outputs = mergeArrivals(waiter.Arrivals)
+	st.ownOutputs[waiter.RunID] = true
+	clearJoin(waiter)
+	waiter.StartedAt = st.now
+	st.save(waiter)
+	return st.visit(waiter)
+}
+
+func edgeSourceNode(inEdges []graph.Edge, edgeID, fallback string) string {
+	for _, e := range inEdges {
+		if e.ID == edgeID {
+			return e.FromNode()
+		}
 	}
-	p.Arrivals[r.Slot] = r.Outputs
-	if p.LiveChildren <= 0 {
-		return st.settle(p)
+	return fallback
+}
+
+// resolveJoinMode 解析汇合节点在运行期的有效 Mode（any / all）：
+// 合并上游动态绑定与调试注入，未覆盖时回落到节点静态声明（Registry.JoinMode）。
+func (st *state) resolveJoinMode(nodeID string, outs engine.Outputs) string {
+	n := st.c.node(nodeID)
+	inj := st.task.Policy.Debug.InjectFor(nodeID)
+	if (inj != nil && len(inj.Vars) > 0) || hasDynamicInput(n.Inputs) {
+		vars, _ := projectNodeInputs(st.c.reg, n, st.task.Input, outs, inj)
+		params := resolveNodeParams(st.c.reg, n, vars, inj)
+		if d, ok := params.(node.JoinModeDeclarer); ok {
+			if mode := d.JoinMode(); mode != "" {
+				return mode
+			}
+		}
+	}
+	if mode := st.c.reg.JoinMode(n); mode != "" {
+		return mode
+	}
+	return node.JoinAll
+}
+
+func hasDynamicInput(inputs map[string]graph.InputRef) bool {
+	for _, ref := range inputs {
+		if ref.From != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasTriggered 报告汇合节点 nodeID 在本次 Task 中是否已被触发（已执行完成并写入 Outputs，或已通过汇合门控正停在调试断点上）。
+func (st *state) hasTriggered(nodeID, excludeRunID string) bool {
+	for _, other := range st.runs {
+		if other.RunID == excludeRunID {
+			continue
+		}
+		if other.Outputs[nodeID] != nil {
+			return true
+		}
+		if other.NodeID == nodeID && other.Status == graph.WAITING && other.WaitReason == engine.WaitDebug {
+			return true
+		}
+	}
+	return false
+}
+
+// findWaitingJoin 查找当前正停在汇合节点 nodeID 上等待其余入边的 Run。
+func (st *state) findWaitingJoin(nodeID, excludeRunID string) *engine.Run {
+	for _, other := range st.list(graph.WAITING) {
+		if other.RunID != excludeRunID && other.NodeID == nodeID && other.WaitReason == engine.WaitJoin {
+			return other
+		}
 	}
 	return nil
 }
 
-// skipDescendants 把 p 除 keep 以外的所有未结束后代置为 SKIPPED（any 汇合的落选分支），并取消它们的子 Task。
-// 执行中的落选分支之后交回的 ActivityDone 因 Run 已不是 RUNNING 而被忽略。
-func (st *state) skipDescendants(p *engine.Run, keep string) {
-	byParent := map[string][]*engine.Run{}
-	for _, r := range st.list(engine.Live...) {
-		byParent[r.ParentRunID] = append(byParent[r.ParentRunID], r)
-	}
-	queue := []string{p.RunID}
-	for len(queue) > 0 {
-		id := queue[0]
-		queue = queue[1:]
-		for _, r := range byParent[id] {
-			if r.RunID == keep {
-				continue
-			}
-			st.skip(r)
-			queue = append(queue, r.RunID)
+// skipLosers 在 Merge(any) 首条入边触发后，将所有仅通向该汇合节点的其余未结束 Run 置为 SKIPPED 并取消其子 Task。
+func (st *state) skipLosers(joinNodeID, winnerRunID string) {
+	var outEdges map[string][]graph.Edge
+	var memo map[string]bool
+	for _, other := range st.list(engine.Live...) {
+		if other.RunID == winnerRunID {
+			continue
+		}
+		if outEdges == nil {
+			outEdges = st.c.allOutEdges()
+			memo = map[string]bool{}
+		}
+		if onlyLeadsToMemo(outEdges, other.NodeID, joinNodeID, memo) {
+			st.skip(other)
 		}
 	}
 }
 
-// settle 在父 Run 的子 Run 全部结束后调用：有到达者时按 Slot 合并各分支输出并进入汇合节点；
-// 无人到达时父 Run 结束。
-func (st *state) settle(p *engine.Run) error {
-	if len(p.Arrivals) == 0 {
-		clearJoin(p)
-		p.Status = graph.SUCCEEDED
-		st.save(p)
-		return st.ended(p)
-	}
-	join := p.JoinNodeID
-	p.Outputs = mergeArrivals(p.Arrivals)
-	clearJoin(p)
-	return st.enter(p, join, "")
-}
-
-// clearJoin 清空父 Run 上的汇合字段。
-func clearJoin(p *engine.Run) {
-	p.WaitReason, p.JoinNodeID = "", ""
-	p.LiveChildren, p.Arrivals = 0, nil
+// clearJoin 清空 Run 上的汇合等待字段。
+func clearJoin(r *engine.Run) {
+	r.WaitReason, r.Arrivals = "", nil
 }

@@ -248,7 +248,17 @@
               "InputSchema": {
                 "type": "object",
                 "properties": {
-                  "Item": {}
+                  "Item": {
+                    "type": [
+                      "string",
+                      "integer",
+                      "number",
+                      "boolean",
+                      "object",
+                      "array",
+                      "null"
+                    ]
+                  }
                 },
                 "additionalProperties": false,
                 "required": [
@@ -389,9 +399,18 @@
     "InputSchema": {
       "type": "object",
       "properties": {
-        "name": {},
-        "score": {},
-        "items": {}
+        "name": {
+          "type": "string"
+        },
+        "score": {
+          "type": "number"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       },
       "additionalProperties": false,
       "required": [

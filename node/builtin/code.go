@@ -18,7 +18,11 @@ type CodeInput struct {
 }
 
 func (c CodeInput) Validate() error {
-	return checkOutputTexts(c.Outputs, true, graph.ValidateExpr)
+	return checkOutKVs(c.Outputs, true)
+}
+
+func (c CodeInput) HasOutput(field string) bool {
+	return hasOutKVKey(c.Outputs, field)
 }
 
 func (c CodeInput) DeclareOutputs() *jsonschema.Schema {

@@ -5,7 +5,7 @@
  * 另提供端点 ID 的拼接/解析：endpointID = nodeID + "." + localName。
  */
 import type { GraphNodeSpec } from './node-spec'
-import { catalogKind } from './node-registry'
+import { catalogKind, type NodeTypeRegistry } from './node-registry'
 import { readCases, switchCaseLabel } from './switch-config'
 import { GRAPH_ENDPOINT_ERROR } from './types'
 
@@ -42,6 +42,26 @@ export type GraphResolvedEndpoint = {
   label: string
   /** 兜底出口（switch 的 ELSE），徽标用弱化色 */
   fallback?: boolean
+}
+
+/**
+ * 计算节点实例实际生效的端点集合，页面层（Editor / RunView 的属性面板与删分支清边）共用此入口：
+ * 端点声明优先取种类描述 spec 的 Endpoints，spec 缺失时用注册表条目的 displayEndpoints 兜底
+ * （与 node-size.specOf 的取值口径一致，只是此处保留页面已按 pack 查到的 spec，不重复查找）；
+ * Renderer 同样取自 spec，随后按 resolveGraphNodeEndpoints 展开（switch 只保留配置中的分支）。
+ */
+export function resolveEffectiveEndpoints(
+  nodeType: string | undefined,
+  spec: Pick<GraphNodeSpec, 'Endpoints' | 'Renderer'> | undefined,
+  registry: NodeTypeRegistry | null | undefined,
+  config?: Record<string, unknown> | null,
+): GraphEndpointSet {
+  return resolveGraphNodeEndpoints(
+    nodeType,
+    spec?.Endpoints ?? registry?.get(nodeType ?? '')?.displayEndpoints,
+    config,
+    spec?.Renderer,
+  )
 }
 
 export type GraphEndpointSet = {

@@ -98,11 +98,3 @@ func TestOutputFromMap(t *testing.T) {
 		t.Fatalf("map output names = %v", names)
 	}
 }
-
-// TestOutputMapPreservesTypes 确认 OutputMap 把输出结构体转成 map 时保留 int64 与 bool。
-func TestOutputMapPreservesTypes(t *testing.T) {
-	got := node.OutputMap(HTTPOutput{Body: "x", Status: 200, OK: true})
-	if got["Body"] != "x" || got["Status"] != int64(200) || got["OK"] != true {
-		t.Fatalf("got %#v", got)
-	}
-}

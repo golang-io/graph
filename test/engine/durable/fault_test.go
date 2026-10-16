@@ -20,6 +20,7 @@ import (
 	"github.com/golang-io/graph/node/builtin"
 	"github.com/golang-io/graph/test"
 	"github.com/golang-io/graph/test/engine/enginetest"
+	"github.com/google/jsonschema-go/jsonschema"
 	"gorm.io/gorm"
 )
 
@@ -90,7 +91,7 @@ func TestLeaseExpiryReclaimsRun(t *testing.T) {
 	var total atomic.Int64
 	path := filepath.Join(t.TempDir(), "graph.db")
 	reg := counted(&calls, &total)
-	opt := durable.Options{Workers: 2, Shards: 4, LeaseDuration: time.Second, PollInterval: 10 * time.Millisecond}
+	opt := durable.Options{Workers: 2, LeaseDuration: time.Second, PollInterval: 10 * time.Millisecond}
 	eng := openDurable(t, path, reg, opt)
 
 	g := enginetest.G([]graph.Node{
@@ -118,7 +119,7 @@ func TestFailTimesRetryUsesStableIdempotencyKey(t *testing.T) {
 	var total atomic.Int64
 	path := filepath.Join(t.TempDir(), "graph.db")
 	reg := counted(&calls, &total)
-	opt := durable.Options{Workers: 2, Shards: 4, LeaseDuration: time.Second, PollInterval: 10 * time.Millisecond}
+	opt := durable.Options{Workers: 2, LeaseDuration: time.Second, PollInterval: 10 * time.Millisecond}
 	eng := openDurable(t, path, reg, opt)
 
 	g := enginetest.G([]graph.Node{
@@ -281,7 +282,7 @@ func opThenEnd(key string) graph.Graph {
 }
 
 // slowOpts 是故障用例的调度参数：租约很长，期间不会因真实时间到期，只由偏移时钟触发回收。
-var slowOpts = durable.Options{Workers: 1, Shards: 1, LeaseDuration: time.Minute, PollInterval: 5 * time.Millisecond}
+var slowOpts = durable.Options{Workers: 1, LeaseDuration: time.Minute, PollInterval: 5 * time.Millisecond}
 
 // 活动节点执行中进程退出：租约过期后 durable 把 Run 放回 PENDING（LostCount 加 1、Attempt 不变），
 // 其他进程重新执行，幂等键不变，Task 成功。
@@ -431,7 +432,7 @@ func TestKernelDefectFailsTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	var log errorLog
-	eng := r.open(reg, durable.Options{Workers: 2, Shards: 2, LeaseDuration: 300 * time.Millisecond, PollInterval: 5 * time.Millisecond}, 0, &log)
+	eng := r.open(reg, durable.Options{Workers: 2, LeaseDuration: 300 * time.Millisecond, PollInterval: 5 * time.Millisecond}, 0, &log)
 	g := enginetest.G([]graph.Node{
 		enginetest.N("a", enginetest.OpType, enginetest.OpInput{}),
 		enginetest.N("bad", "bad_ctrl", nil),
@@ -474,7 +475,7 @@ func TestRedeliverChildDone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng := r.open(reg, durable.Options{Workers: 2, Shards: 2, LeaseDuration: 300 * time.Millisecond, PollInterval: 5 * time.Millisecond}, 0, nil)
+	eng := r.open(reg, durable.Options{Workers: 2, LeaseDuration: 300 * time.Millisecond, PollInterval: 5 * time.Millisecond}, 0, nil)
 	var dropped atomic.Int32
 	durable.DropDeliveries(eng, func(cmd kernel.Command) bool {
 		_, ok := cmd.(kernel.NotifyParent)
@@ -516,7 +517,7 @@ func (r *rig) awaited(parentID string) int64 {
 // 父 Task 取消后父 Run 不再等待，同一写回清除全部 Awaited。
 func TestAwaitedTracksParentWait(t *testing.T) {
 	r := newRig(t)
-	eng := r.open(opWith(t, blocking), durable.Options{Workers: 2, Shards: 2, LeaseDuration: time.Minute, PollInterval: 5 * time.Millisecond}, 0, nil)
+	eng := r.open(opWith(t, blocking), durable.Options{Workers: 2, LeaseDuration: time.Minute, PollInterval: 5 * time.Millisecond}, 0, nil)
 	body := enginetest.GI([]string{builtin.MapItemField}, []graph.Node{
 		enginetest.N("b", enginetest.OpType, enginetest.OpInput{}), enginetest.N("finish", builtin.End, nil),
 	}, enginetest.E("b", "finish"))
@@ -568,7 +569,7 @@ func TestAwaitedTracksParentWait(t *testing.T) {
 // 父 Task 取消后、投递 CancelChild 之前进程退出：恢复扫描发现子 Task 未结束而父 Run 已不再等待它（Awaited 已清除），补发 Cancel。
 func TestRedeliverCancel(t *testing.T) {
 	r := newRig(t)
-	eng := r.open(opWith(t, blocking), durable.Options{Workers: 2, Shards: 2, LeaseDuration: 300 * time.Millisecond, PollInterval: 5 * time.Millisecond}, 0, nil)
+	eng := r.open(opWith(t, blocking), durable.Options{Workers: 2, LeaseDuration: 300 * time.Millisecond, PollInterval: 5 * time.Millisecond}, 0, nil)
 	durable.DropDeliveries(eng, func(cmd kernel.Command) bool {
 		_, ok := cmd.(kernel.CancelChild)
 		return ok
@@ -714,62 +715,6 @@ func TestSavedResultAppliedAfterCrash(t *testing.T) {
 	}
 }
 
-// waitCompiled 等待 eng 的 byTask 条目数（durable.CompiledTasks）等于 want。
-func waitCompiled(t *testing.T, eng engine.Engine, want int) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for durable.CompiledTasks(eng) != want {
-		if time.Now().After(deadline) {
-			t.Fatalf("compiled tasks = %d, want %d", durable.CompiledTasks(eng), want)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-// 本进程写入终态的 Task（含 map 循环体派生的子 Task）结束后，编译结果表中不留条目。
-func TestCompiledDroppedWhenTaskEnds(t *testing.T) {
-	r := newRig(t)
-	reg, err := enginetest.Registry(enginetest.OpSpec())
-	if err != nil {
-		t.Fatal(err)
-	}
-	eng := r.open(reg, slowOpts, 0, nil)
-	body := enginetest.GI([]string{builtin.MapItemField}, []graph.Node{
-		enginetest.N("b", enginetest.OpType, enginetest.OpInput{Set: map[string]any{"y": 1}}),
-		enginetest.In(enginetest.N("finish", builtin.End, nil), map[string]graph.InputRef{"y": enginetest.R("b", "y")}),
-	}, enginetest.E("b", "finish"))
-	rec, err := eng.Start(context.Background(), engine.StartRequest{Graph: mapOver(body), Input: map[string]any{"items": []any{1, 2}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitStatus(t, eng, rec.TaskID, graph.SUCCEEDED)
-	if n := durable.CompiledTasks(eng); n != 0 {
-		t.Fatalf("compiled tasks after success = %d, want 0", n)
-	}
-}
-
-// Task 由另一个进程取消：本进程的编译结果条目不会在写回时删除，由恢复扫描（pruneCompiled）清理。
-func TestCompiledPrunedWhenOtherProcessEndsTask(t *testing.T) {
-	r := newRig(t)
-	// 租约 300ms：a 每 100ms 执行一次恢复扫描，执行中的节点按时续租，不会被回收。
-	a := r.open(opWith(t, blocking), durable.Options{Workers: 1, Shards: 1, LeaseDuration: 300 * time.Millisecond, PollInterval: 5 * time.Millisecond}, 0, nil)
-	b := r.open(opWith(t, blocking), slowOpts, 0, nil)
-	rec, err := a.Start(context.Background(), engine.StartRequest{Graph: opThenEnd("v")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.waitRun(rec.TaskID, "a", func(run durable.DurableRun) bool { return run.Status == graph.RUNNING })
-	waitCompiled(t, a, 1)
-	if _, err := b.Signal(context.Background(), rec.TaskID, engine.Signal{Kind: engine.SignalCancel}); err != nil {
-		t.Fatal(err)
-	}
-	waitStatus(t, b, rec.TaskID, graph.CANCELED)
-	waitCompiled(t, a, 0)
-	if n := durable.CompiledTasks(b); n != 0 {
-		t.Fatalf("b compiled tasks = %d, want 0", n)
-	}
-}
-
 // TestRecoveryModeSkipsMigrationAndWrites 确认 RecoveryMode 为只读模式：
 //   - 在空库上构造不执行 AutoMigrate / CreateIndex 等任何 DDL（表不会被创建）；
 //   - 在已有库上构造不回收过期租约、不启动 worker，拒绝 Start 与 Signal，只允许查询。
@@ -897,45 +842,6 @@ func TestConsistentSnapshotAndFingerprintRead(t *testing.T) {
 		afterSnap.Runs[0].Status != graph.SUCCEEDED || afterSnap.Runs[0].Seq != 2 {
 		t.Fatalf("post-commit snapshot: task=%s(v%d) run=%+v", afterSnap.Task.Status, afterSnap.Task.Version, afterSnap.Runs)
 	}
-
-	// 同样验证 LoadFingerprint：在读取 Task 指纹列之后、读取 Run 指纹列之前并发提交 Version=3, Seq=3，
-	// 当前读事务返回的指纹仍严格等于提交前（Version=2, Seq=2）的快照指纹。
-	var fpHookOnce sync.Once
-	err = readerDB.Callback().Query().After("gorm:query").Register("test:interleave_fp_commit", func(tx *gorm.DB) {
-		if tx.Statement != nil && tx.Statement.Table == "tb_graph_task" {
-			fpHookOnce.Do(func() {
-				err := writerDB.Transaction(func(wtx *gorm.DB) error {
-					if err := wtx.Model(&engine.Task{}).Where(map[string]any{"TaskID": task.TaskID}).
-						Updates(map[string]any{"Version": 3}).Error; err != nil {
-						return err
-					}
-					return wtx.Model(&engine.Run{}).Where(map[string]any{"RunID": run.RunID}).
-						Updates(map[string]any{"Seq": 3}).Error
-				})
-				if err != nil {
-					t.Errorf("concurrent write during LoadFingerprint failed: %v", err)
-				}
-			})
-		}
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	fp, err := engine.LoadFingerprint(readerDB.WithContext(ctx), task.TaskID)
-	if err != nil || fp != engine.Fingerprint(afterSnap) {
-		t.Fatalf("LoadFingerprint during concurrent commit = %q, err %v; want %q", fp, err, engine.Fingerprint(afterSnap))
-	}
-
-	// 再下一轮读取指纹，应反映最新已提交的 Version=3, Seq=3。
-	finalSnap, err := engine.LoadSnapshot(readerDB.WithContext(ctx), task.TaskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	finalFP, err := engine.LoadFingerprint(readerDB.WithContext(ctx), task.TaskID)
-	if err != nil || finalFP != engine.Fingerprint(finalSnap) || finalSnap.Task.Version != 3 || finalSnap.Runs[0].Seq != 3 {
-		t.Fatalf("final LoadFingerprint = %q, err %v; want %q (v3/seq3)", finalFP, err, engine.Fingerprint(finalSnap))
-	}
 }
 
 // TestHeartbeatDBErrorCancelsUponLeaseExpiry 确认续租遇到数据库错误时：
@@ -967,7 +873,7 @@ func TestHeartbeatDBErrorCancelsUponLeaseExpiry(t *testing.T) {
 			return node.NodeOutput{}, ctx.Err()
 		}
 		return node.NodeOutput{Set: map[string]any{"v": "recovered"}}, nil
-	}), durable.Options{Workers: 1, Shards: 1, LeaseDuration: 180 * time.Millisecond, PollInterval: 5 * time.Millisecond}, 0, &log)
+	}), durable.Options{Workers: 1, LeaseDuration: 180 * time.Millisecond, PollInterval: 5 * time.Millisecond}, 0, &log)
 
 	rec, err := eng.Start(context.Background(), engine.StartRequest{Graph: opThenEnd("v")})
 	if err != nil {
@@ -1006,5 +912,209 @@ func TestHeartbeatDBErrorCancelsUponLeaseExpiry(t *testing.T) {
 			t.Fatalf("task %s did not reach terminal state: %s", rec.TaskID, s.Task.Status)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Map 多轮执行在中途投递丢失并经恢复扫描继续推进时，Units 与已写入 Results 中的大整数精度保持不变。
+func TestRedeliverChildDonePreservesLargeInt64(t *testing.T) {
+	r := newRig(t)
+	reg, err := enginetest.Registry(enginetest.OpSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := r.open(reg, durable.Options{Workers: 1, LeaseDuration: 300 * time.Millisecond, PollInterval: 5 * time.Millisecond}, 0, nil)
+	var dropped atomic.Int32
+	durable.DropDeliveries(eng, func(cmd kernel.Command) bool {
+		_, ok := cmd.(kernel.NotifyParent)
+		return ok && dropped.Add(1) == 1
+	})
+	body := graph.Graph{
+		InputSchema: graph.RunInputSchema(map[string]*jsonschema.Schema{
+			builtin.MapItemField: graph.AnyValueSchema(),
+		}),
+		Nodes: []graph.Node{
+			enginetest.N("s", builtin.Start, nil),
+			enginetest.In(enginetest.N("finish", builtin.End, nil),
+				map[string]graph.InputRef{"Value": enginetest.R(graph.InputSource, builtin.MapItemField)}),
+		},
+		Edges: []graph.Edge{enginetest.E("s", "finish")},
+	}
+	items := []any{int64(9007199254740993), int64(9007199254740995)}
+	g := graph.Graph{
+		Nodes: []graph.Node{
+			enginetest.N("s", builtin.Start, nil),
+			enginetest.N("m", builtin.Map, builtin.MapInput{List: items, Chunk: 1, MaxParallel: 1, Body: &body}),
+			enginetest.In(enginetest.N("finish", builtin.End, nil),
+				map[string]graph.InputRef{"Results": enginetest.R("m", builtin.MapResultsField)}),
+		},
+		Edges: []graph.Edge{enginetest.E("s", "m"), enginetest.E("m", "finish")},
+	}
+	rec, err := eng.Start(context.Background(), engine.StartRequest{Graph: g})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := waitStatus(t, eng, rec.TaskID, graph.SUCCEEDED)
+	if dropped.Load() < 1 {
+		t.Fatal("NotifyParent was never dropped")
+	}
+	raw, _ := json.Marshal(s.Task.Output)
+	want := `{"Results":[{"Value":9007199254740993},{"Value":9007199254740995}]}`
+	if string(raw) != want {
+		t.Fatalf("output = %s, want %s", raw, want)
+	}
+}
+
+// 连接池耗尽导致续租查询阻塞时，heartbeat 仍在租约到期时取消活动节点 ctx，且 Close 不因等待续租查询而卡死（R02）。
+func TestHeartbeatPoolStallCancelsOnExpiry(t *testing.T) {
+	entered := make(chan struct{})
+	canceled := make(chan struct{})
+	stall := enginetest.FuncNode{
+		NodeSpec: node.WithParams(node.NodeSpec{ID: "stall", Name: "stall", Endpoints: node.DefaultEndpoints()}, struct{}{}),
+		Exec: func(ctx context.Context, _ node.NodeInput) (node.NodeOutput, error) {
+			close(entered)
+			<-ctx.Done()
+			close(canceled)
+			return node.NodeOutput{}, ctx.Err()
+		},
+	}
+	reg, err := enginetest.Registry(stall)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := test.MustOpen(t, filepath.Join(t.TempDir(), "stall.db"))
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	eng, err := durable.With(durable.Options{Workers: 1, LeaseDuration: 120 * time.Millisecond, PollInterval: time.Millisecond})(
+		context.Background(), engine.EngineConfig{DB: db, Nodes: reg},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close(context.Background())
+
+	g := graph.Graph{
+		Nodes: []graph.Node{enginetest.N("s", builtin.Start, nil), enginetest.N("a", "stall", nil), enginetest.N("e", builtin.End, nil)},
+		Edges: []graph.Edge{enginetest.E("s", "a"), enginetest.E("a", "e")},
+	}
+	if _, err := eng.Start(context.Background(), engine.StartRequest{Graph: g}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("executor not entered")
+	}
+	// 借走唯一连接模拟连接池耗尽。
+	conn, err := sqlDB.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	select {
+	case <-canceled:
+	case <-time.After(420 * time.Millisecond):
+		t.Fatal("executor still live after >3 leases while DB pool exhausted")
+	}
+}
+
+// 预取消或连接池等待超时的 Start 请求立即返回 ctx.Err()，不会迟到提交写库（R05）。
+func TestPreCanceledAndTimedOutStartDoNotWrite(t *testing.T) {
+	r := newRig(t)
+	reg, err := enginetest.Registry(enginetest.OpSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := r.open(reg, slowOpts, 0, nil)
+	g := graph.Graph{
+		Nodes: []graph.Node{enginetest.N("s", builtin.Start, nil), enginetest.N("e", builtin.End, nil)},
+		Edges: []graph.Edge{enginetest.E("s", "e")},
+	}
+
+	// 1. 预取消的 ctx 不创建 Task。
+	cctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := eng.Start(cctx, engine.StartRequest{Graph: g}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-canceled Start err = %v, want context.Canceled", err)
+	}
+
+	// 2. 连接池耗尽时按请求截止时间退出，释放连接后不发生迟到提交。
+	sqlDB, err := r.db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	conn, err := sqlDB.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tctx, tcancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer tcancel()
+	_, err = eng.Start(tctx, engine.StartRequest{Graph: g})
+	conn.Close()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("pool-stalled Start err = %v, want context.DeadlineExceeded", err)
+	}
+	var count int64
+	if err := r.db.Model(&engine.Task{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("tasks in DB = %d (err=%v), want 0", count, err)
+	}
+}
+
+// 数据库持续故障时，多个 worker 的领取执行指数退避（期间不响应 kick），显著降低失败重试与错误上报频率；
+// 数据库恢复后自动重置退避并完成待执行任务（S10）。
+func TestClaimBackoffOnDBOutage(t *testing.T) {
+	r := newRig(t)
+	var failClaim atomic.Bool
+	var claimAttempts atomic.Int32
+	if err := r.db.Callback().Query().Before("gorm:query").Register("test:fail_claim_query", func(tx *gorm.DB) {
+		if failClaim.Load() && tx.Statement != nil && tx.Statement.Table == "tb_graph_run" {
+			claimAttempts.Add(1)
+			tx.AddError(errors.New("simulated claim db outage"))
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reg, err := enginetest.Registry(enginetest.OpSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var log errorLog
+	eng := r.open(reg, durable.Options{
+		Workers:       4,
+		LeaseDuration: 150 * time.Millisecond,
+		PollInterval:  5 * time.Millisecond,
+	}, 0, &log)
+
+	failClaim.Store(true)
+	rec, err := eng.Start(context.Background(), engine.StartRequest{
+		Graph: enginetest.G([]graph.Node{
+			enginetest.N("a", enginetest.OpType, enginetest.OpInput{Set: map[string]any{"v": "ok"}}),
+			enginetest.In(enginetest.N("finish", builtin.End, nil), map[string]graph.InputRef{"v": enginetest.R("a", "v")}),
+		}, enginetest.E("a", "finish")),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 持续故障 160ms：无退避时 4 个 worker 按 5ms 轮询会产生约 128 次尝试；指数退避应将其抑制在个位数到十余次。
+	time.Sleep(160 * time.Millisecond)
+	failClaim.Store(false)
+
+	s := waitStatus(t, eng, rec.TaskID, graph.SUCCEEDED)
+	if s.Task.Output["v"] != "ok" {
+		t.Fatalf("output = %v, want ok", s.Task.Output)
+	}
+
+	attempts := int(claimAttempts.Load())
+	if attempts < 4 || attempts > 36 {
+		t.Fatalf("claim attempts during 160ms outage = %d, want in [4, 36] with exponential backoff", attempts)
+	}
+	if !log.has("durable: claim:") {
+		t.Fatalf("expected observer to receive claim error, got %v", log.errs)
 	}
 }

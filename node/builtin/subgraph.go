@@ -34,7 +34,7 @@ func (c SubGraphInput) Validate() error {
 	if strings.TrimSpace(c.GraphID) == "" {
 		return fmt.Errorf("GraphID required")
 	}
-	return graph.ValidateTemplate(c.GraphID)
+	return nil
 }
 
 func (c SubGraphInput) Expressions() []node.Expression {
@@ -83,7 +83,7 @@ func (SubGraphNode) Control(_ context.Context, in node.ControlInput) (node.NodeO
 		if output == nil {
 			output = map[string]any{}
 		}
-		return node.Continue(node.OutputMap(SubGraphOutput{Output: output, GraphID: gid}), ""), nil
+		return node.Continue(map[string]any{SubGraphOutputField: output, SubGraphGraphIDField: gid}, ""), nil
 	default:
 		return node.NodeOutput{}, fmt.Errorf("subgraph: unexpected event %q", in.Event.Kind)
 	}

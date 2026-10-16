@@ -92,4 +92,36 @@ describe('buildRunStatusMaps from Runs', () => {
       e7: 'failed',
     })
   })
+
+  it('does not paint an untaken direct switch branch to a visited merge node', () => {
+    const edges = [
+      edge('e_start', 'start', 'gate'),
+      edge('e_direct', 'gate', 'join_sw', 'Case0'),
+      edge('e_via_lo', 'gate', 'lo', 'Case1'),
+      edge('e_lo_join', 'lo', 'join_sw'),
+      edge('e_end', 'join_sw', 'end'),
+    ]
+    const runs: GraphRun[] = [
+      run({
+        RunID: 'root',
+        NodeID: 'end',
+        Status: 'SUCCEEDED',
+        FromEdgeID: 'e_end',
+        Outputs: {
+          start: {},
+          gate: {},
+          lo: { tag: 'lo' },
+          join_sw: { tag: 'lo' },
+        },
+      }),
+    ]
+    const maps = buildRunStatusMaps(runs, edges)
+    expect(maps.edgeStatus).toEqual({
+      e_start: 'succeeded',
+      e_via_lo: 'succeeded',
+      e_lo_join: 'succeeded',
+      e_end: 'succeeded',
+    })
+    expect(maps.edgeStatus.e_direct).toBeUndefined()
+  })
 })

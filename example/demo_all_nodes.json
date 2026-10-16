@@ -227,8 +227,12 @@
     "InputSchema": {
       "type": "object",
       "properties": {
-        "name": {},
-        "score": {}
+        "name": {
+          "type": "string"
+        },
+        "score": {
+          "type": "number"
+        }
       },
       "additionalProperties": false,
       "required": [

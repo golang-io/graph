@@ -71,6 +71,36 @@ export type GraphViewState = {
   edges?: Record<string, { selected?: boolean; runStatus?: RunStatus; animated?: boolean; style?: CSSProperties }>
 }
 
+/**
+ * 把视图状态（选中、拖拽、运行态等只影响展示的字段）合并进结构投影。
+ * projectDocument 的结果只含图结构，三个使用方（useGraphDocument、React Flow 画布、X6 画布）
+ * 统一经此合并，合并规则只有一份：
+ * - view 中没有对应 ID 的条目时，节点 / 边保持原引用，避免下游按引用比较时误判为已变化；
+ * - view 既无 nodes 也无 edges 时原样返回 base（同一引用），不重建数组。
+ */
+export function applyGraphViewState(
+  base: { nodes: GraphEditorNode[]; edges: GraphEditorEdge[] },
+  view: GraphViewState,
+): { nodes: GraphEditorNode[]; edges: GraphEditorEdge[] } {
+  if (!view.nodes && !view.edges) return base
+  return {
+    nodes: view.nodes
+      ? base.nodes.map((n) => (view.nodes?.[n.id] ? { ...n, ...view.nodes[n.id] } : n))
+      : base.nodes,
+    edges: view.edges
+      ? base.edges.map((e) => (view.edges?.[e.id] ? { ...e, ...view.edges[e.id] } : e))
+      : base.edges,
+  }
+}
+
+/**
+ * 返回把编辑节点 id 的端点所在边替换为 sides 后的节点列表，未命中的节点保持原引用。
+ * 供页面层修改单个节点的端点方位时共用；历史记录等副作用由调用方在调用前自行处理。
+ */
+export function withNodeEndpointSides(nodes: GraphEditorNode[], id: string, sides: EndpointSides): GraphEditorNode[] {
+  return nodes.map((n) => (n.id === id ? { ...n, endpointSides: sides } : n))
+}
+
 /** 画布编辑模型中的节点（渲染器内部结构，非 JSON）。便签以 type='annotation' 的节点表示。 */
 export interface GraphEditorNode {
   id: string
@@ -148,10 +178,53 @@ export function withEndpointSides(document: GraphUI, registry: NodeTypeRegistry 
   return same(filled, ui) ? document : { ...document, UI: filled }
 }
 
-export function projectDocument(document: GraphUI, view: GraphViewState = {}) {
+/**
+ * projectDocument 增量复用缓存项：记录节点原始 Inputs 引用与已克隆的 config / inputs，
+ * 在仅坐标或布局变化时跳过对未改动节点的 splitInputs 与 structuredClone。
+ * Incremental cache entry for projectDocument to skip splitInputs/structuredClone on unchanged nodes.
+ */
+export type ProjectionNodeCacheEntry = {
+  rawInputs: unknown
+  body?: 'expanded' | 'collapsed'
+  config: Record<string, unknown>
+  inputs?: Record<string, GraphInputRef>
+}
+
+const KNOWN_UI_KEYS = new Set([
+  'Positions',
+  'EndpointSides',
+  'EdgeRails',
+  'ExecutionMode',
+  'StickyNotes',
+  'SubLayouts',
+])
+
+/**
+ * 过滤掉画布不认识的顶层 UI 键（主图层 Collapsed 等不写出，与后端 CleanUI 一致）；
+ * 若全部顶层键均合法则原样返回 base 同一引用，避免无谓的浅拷贝与重投影。
+ * Strips unknown top-level UI keys; returns the same reference if all keys are valid.
+ */
+export function cleanDocumentUI(base: GraphUI): GraphUI {
+  if (!base.UI) return base
+  const entries = Object.entries(base.UI)
+  const filtered = entries.filter(([key]) => KNOWN_UI_KEYS.has(key))
+  if (filtered.length === entries.length) return base
+  return { ...base, UI: Object.fromEntries(filtered) as GraphLayoutUI }
+}
+
+export function projectDocument(
+  document: GraphUI,
+  view: GraphViewState = {},
+  reuseCache?: Map<string, ProjectionNodeCacheEntry>,
+) {
   const ui = document.UI ?? {}
   const nodes: GraphEditorNode[] = [], edges: GraphEditorEdge[] = []
-  projectScope(document.Graph, ui, '', { x: 0, y: 0 }, view, nodes, edges)
+  const nextCache = reuseCache ? new Map<string, ProjectionNodeCacheEntry>() : undefined
+  projectScope(document.Graph, ui, '', { x: 0, y: 0 }, view, nodes, edges, reuseCache, nextCache)
+  if (reuseCache && nextCache) {
+    reuseCache.clear()
+    for (const [k, v] of nextCache) reuseCache.set(k, v)
+  }
   const ids = new Set(nodes.map((n) => n.id))
   for (const n of (ui.StickyNotes ?? []).slice().reverse()) {
     if (ids.has(n.ID)) throw new Error(`Duplicate canvas node ${n.ID}`)
@@ -169,25 +242,50 @@ export function projectDocument(document: GraphUI, view: GraphViewState = {}) {
 function projectScope(
   graph: GraphJSON, layout: ScopeLayout, scope: string, origin: GraphPoint,
   view: GraphViewState, nodes: GraphEditorNode[], edges: GraphEditorEdge[],
+  reuseCache?: Map<string, ProjectionNodeCacheEntry>,
+  nextCache?: Map<string, ProjectionNodeCacheEntry>,
 ) {
   // 没有坐标的节点从左到右沿 x 递增排布；循环体内从标题栏下方开始。
   graph.Nodes.forEach((n, i) => {
     const id = scopedId(scope, n.ID), at = layout.Positions?.[n.ID]
-    const { literals, bindings } = splitInputs(n.Inputs)
     const rel = at ? { x: at.X, y: at.Y }
       : scope ? { x: BODY_PAD + i * 240, y: BODY_HEADER }
         : { x: i * 240, y: 100 }
     const position = { x: origin.x + rel.x, y: origin.y + rel.y }
-    // 带内嵌子图的节点：子图层 Layout.Collapsed 为 true 时收起，缺省展开
-    const body = bodyGraphOf(literals), bodyUI = layout.SubLayouts?.[n.ID]
-    const mode = body ? (bodyUI?.Collapsed ? 'collapsed' : 'expanded') : undefined
+    const cached = reuseCache?.get(id)
+    let config: Record<string, unknown>
+    let inputs: Record<string, GraphInputRef> | undefined
+    let body: GraphJSON | undefined
+    let mode: 'expanded' | 'collapsed' | undefined
+    const bodyUI = layout.SubLayouts?.[n.ID]
+
+    if (cached && cached.rawInputs === n.Inputs && cached.body === undefined) {
+      config = cached.config
+      inputs = cached.inputs
+    } else {
+      const { literals, bindings } = splitInputs(n.Inputs)
+      body = bodyGraphOf(literals)
+      mode = body ? (bodyUI?.Collapsed ? 'collapsed' : 'expanded') : undefined
+      if (cached && cached.rawInputs === n.Inputs && cached.body === mode) {
+        config = cached.config
+        inputs = cached.inputs
+      } else {
+        config = structuredClone(literals)
+        inputs = Object.keys(bindings).length ? structuredClone(bindings) : undefined
+      }
+    }
+
+    if (nextCache) {
+      nextCache.set(id, { rawInputs: n.Inputs, body: mode, config, inputs })
+    }
+
     nodes.push({
-      id, type: n.Kind, name: n.Name ?? n.Kind, config: structuredClone(literals),
-      ...(Object.keys(bindings).length ? { inputs: structuredClone(bindings) } : {}),
+      id, type: n.Kind, name: n.Name ?? n.Kind, config,
+      ...(inputs ? { inputs } : {}),
       // 端点所在边原样投影（未写明的端点由渲染器按 resolveEndpointSides 补齐显示，保存前由 withEndpointSides 写入）
       position, endpointSides: parseEndpointSides(layout.EndpointSides?.[n.ID]), ...(mode ? { body: mode } : {}), ...view.nodes?.[id],
     })
-    if (mode === 'expanded') projectScope(body!, bodyUI ?? {}, id, position, view, nodes, edges)
+    if (mode === 'expanded') projectScope(body!, bodyUI ?? {}, id, position, view, nodes, edges, reuseCache, nextCache)
   })
   for (const e of graph.Edges) {
     // 端点 ID → 编辑模型：from/to 取节点画布 ID，when 取 From 端点本地名（默认出口 Out 记为无分支）。
@@ -208,22 +306,69 @@ type WriteContext = {
   /** 原文档中已展开的容器：只有它们的子节点在画布上，Body 才按画布重建 */
   expanded: Set<string>
   originalPosition: Map<string, GraphPoint>
+  originalNode: Map<string, GraphEditorNode>
 }
 
-export function documentFromProjection(nodes: GraphEditorNode[], edges: GraphEditorEdge[], base: GraphUI): GraphUI {
-  const original = projectDocument(base)
-  const authorNode = ({ id, type, name, config, inputs, position, endpointSides, note, color, transparent, width, height }: GraphEditorNode) => ({ id, type, name, config, inputs, position, endpointSides, note, color, transparent, width, height })
-  const authorEdge = ({ id, from, to, when, rail }: GraphEditorEdge) => ({ id, from, to, when, rail })
-  // 只保留 graph.UI 已知的键；主图层 Collapsed 不写出（与后端 CleanUI 一致）。
-  const ui = Object.fromEntries(Object.entries(base.UI ?? {}).filter(([key]) => ['Positions', 'EndpointSides', 'EdgeRails', 'ExecutionMode', 'StickyNotes', 'SubLayouts'].includes(key))) as GraphLayoutUI
+function sameAuthorNode(a: GraphEditorNode, b: GraphEditorNode): boolean {
+  if (a === b) return true
+  return (
+    a.id === b.id &&
+    a.type === b.type &&
+    a.name === b.name &&
+    a.position.x === b.position.x &&
+    a.position.y === b.position.y &&
+    a.width === b.width &&
+    a.height === b.height &&
+    a.note === b.note &&
+    a.color === b.color &&
+    a.transparent === b.transparent &&
+    (a.endpointSides === b.endpointSides || same(a.endpointSides, b.endpointSides)) &&
+    (a.config === b.config || same(a.config, b.config)) &&
+    (a.inputs === b.inputs || same(a.inputs, b.inputs))
+  )
+}
+
+function sameAuthorNodes(a: GraphEditorNode[], b: GraphEditorNode[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (!sameAuthorNode(a[i]!, b[i]!)) return false
+  }
+  return true
+}
+
+function sameAuthorEdges(a: GraphEditorEdge[], b: GraphEditorEdge[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    const ea = a[i]!, eb = b[i]!
+    if (ea.id !== eb.id || ea.from !== eb.from || ea.to !== eb.to || ea.when !== eb.when || ea.rail !== eb.rail) {
+      return false
+    }
+  }
+  return true
+}
+
+export function documentFromProjection(
+  nodes: GraphEditorNode[],
+  edges: GraphEditorEdge[],
+  base: GraphUI,
+  originalProjection?: { nodes: GraphEditorNode[]; edges: GraphEditorEdge[] },
+): GraphUI {
+  const original = originalProjection ?? projectDocument(base)
   // 画布未改动（只有选中、运行态等展示叠加）：只去掉画布不认识的 UI 键，否则原样返回，不产生保存差异；
   // 缺失的 EndpointSides 由保存前的 withEndpointSides 补齐。
-  if (same(nodes.map(authorNode), original.nodes.map(authorNode)) && same(edges.map(authorEdge), original.edges.map(authorEdge))) {
-    return same(ui, base.UI ?? {}) ? base : { ...base, UI: ui }
+  if (sameAuthorNodes(nodes, original.nodes) && sameAuthorEdges(edges, original.edges)) {
+    return cleanDocumentUI(base)
   }
+  // 只保留 graph.UI 已知的键；主图层 Collapsed 不写出（与后端 CleanUI 一致）。
+  const ui = Object.fromEntries(Object.entries(base.UI ?? {}).filter(([key]) => KNOWN_UI_KEYS.has(key))) as GraphLayoutUI
   const group = <T,>(list: T[], key: (item: T) => string) => {
     const out = new Map<string, T[]>()
-    for (const item of list) out.set(key(item), [...(out.get(key(item)) ?? []), item])
+    for (const item of list) {
+      const k = key(item)
+      const bucket = out.get(k)
+      if (bucket) bucket.push(item)
+      else out.set(k, [item])
+    }
     return out
   }
   const ctx: WriteContext = {
@@ -232,17 +377,26 @@ export function documentFromProjection(nodes: GraphEditorNode[], edges: GraphEdi
     edgesByScope: group(edges.filter((e) => scopeOf(e.from) === scopeOf(e.to)), (e) => scopeOf(e.from)),
     expanded: new Set(original.nodes.filter((n) => n.body === 'expanded').map((n) => n.id)),
     originalPosition: new Map(original.nodes.map((n) => [n.id, n.position])),
+    originalNode: new Map(original.nodes.map((n) => [n.id, n])),
   }
   const root = writeScope('', base.Graph, ui, { x: 0, y: 0 }, ctx)
   const has = (m?: Record<string, unknown>) => !!m && Object.keys(m).length > 0
+  // 当顶层 Nodes、Edges 均与原图引用一致且 base.Graph 不含额外未知键时，直接复用 base.Graph 引用，
+  // 使仅改动布局（拖拽节点、缩放便签、旋转端点）时不触发下游对 Graph 的重新解析与序列化比对。
+  const sameGraphRef =
+    root.graph.Nodes === base.Graph.Nodes &&
+    root.graph.Edges === base.Graph.Edges &&
+    Object.keys(base.Graph).every((k) => k === 'InputSchema' || k === 'Nodes' || k === 'Edges')
   return {
     ...base,
-    Graph: {
-      // 运行输入声明不在画布上编辑，原样保留。
-      ...(base.Graph.InputSchema ? { InputSchema: base.Graph.InputSchema } : {}),
-      Nodes: root.graph.Nodes,
-      Edges: root.graph.Edges,
-    },
+    Graph: sameGraphRef
+      ? base.Graph
+      : {
+          // 运行输入声明不在画布上编辑，原样保留。
+          ...(base.Graph.InputSchema ? { InputSchema: base.Graph.InputSchema } : {}),
+          Nodes: root.graph.Nodes,
+          Edges: root.graph.Edges,
+        },
     UI: {
       ...ui,
       ...(ui.Positions || has(root.layout.Positions) ? { Positions: root.layout.Positions ?? {} } : {}),
@@ -268,31 +422,56 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
  */
 function writeScope(scope: string, oldGraph: GraphJSON, oldLayout: ScopeLayout, origin: GraphPoint, ctx: WriteContext): { graph: Pick<GraphJSON, 'Nodes' | 'Edges'>; layout: ScopeLayout } {
   const list = ctx.nodesByScope.get(scope) ?? [], ids = new Set(list.map((n) => n.id))
+  const oldById = new Map(oldGraph.Nodes.map((o) => [o.ID, o]))
   const positions: Record<string, GraphUIPoint> = {}, sides: Record<string, GraphUIEndpointSides> = {}, subLayouts: Record<string, GraphLayoutUI> = {}
   const nodes = list.map((n): GraphNodeJSON => {
-    const local = localIdOf(n.id), old = oldGraph.Nodes.find((o) => o.ID === local)
+    const local = localIdOf(n.id), old = oldById.get(local), orig = ctx.originalNode.get(n.id)
     let config = n.config
     const body = bodyGraphOf(config)
     if (body && ctx.expanded.has(n.id)) {
       const sub = writeScope(n.id, body, oldLayout.SubLayouts?.[local] ?? {}, n.position, ctx)
-      const schema = bodyInputSchema(body.InputSchema, Object.keys(mergeInputs(config, n.inputs)))
-      // 先展开原 Body 再覆盖，保持键顺序，未改动的循环体序列化结果不变
-      config = { ...config, [BODY_INPUT]: { ...(config[BODY_INPUT] as object), Nodes: sub.graph.Nodes, Edges: sub.graph.Edges, ...(schema !== body.InputSchema ? { InputSchema: schema } : {}) } }
+      const rawBody = (config[BODY_INPUT] as GraphJSON | undefined) ?? body
+      const canSkipMerge = config === orig?.config && n.inputs === orig?.inputs && old?.Inputs !== undefined
+      const inputNames = canSkipMerge ? Object.keys(old.Inputs!) : Object.keys(mergeInputs(config, n.inputs))
+      const schema = bodyInputSchema(body.InputSchema, inputNames)
+      // 先展开原 Body 再覆盖，保持键顺序；若循环体 Nodes、Edges 与 InputSchema 均未变化则保持 config 引用不变
+      if (sub.graph.Nodes !== rawBody.Nodes || sub.graph.Edges !== rawBody.Edges || schema !== body.InputSchema) {
+        config = { ...config, [BODY_INPUT]: { ...(config[BODY_INPUT] as object), Nodes: sub.graph.Nodes, Edges: sub.graph.Edges, ...(schema !== body.InputSchema ? { InputSchema: schema } : {}) } }
+      }
       if (Object.keys(sub.layout).length) subLayouts[local] = sub.layout
     } else if (oldLayout.SubLayouts?.[local]) subLayouts[local] = oldLayout.SubLayouts[local]
+    const origPos = ctx.originalPosition.get(n.id)
     if (scope) positions[local] = { X: Math.max(BODY_PAD, n.position.x - origin.x), Y: Math.max(BODY_HEADER, n.position.y - origin.y) }
-    else if (oldLayout.Positions?.[local] || !same(n.position, ctx.originalPosition.get(n.id))) positions[local] = { X: n.position.x, Y: n.position.y }
+    else if (oldLayout.Positions?.[local] || !origPos || n.position.x !== origPos.x || n.position.y !== origPos.y) positions[local] = { X: n.position.x, Y: n.position.y }
     // 端点所在边原样写回；未写明的端点由保存前的 withEndpointSides 补齐
     if (n.endpointSides && Object.keys(n.endpointSides).length) sides[local] = { ...n.endpointSides }
+    // 快速路径：当节点 config 与 inputs 引用与原投影一致（如仅拖拽改变坐标）时，直接复用原节点或原 Inputs，跳过整表序列化对比
+    if (old && orig && config === orig.config && n.inputs === orig.inputs) {
+      const wantName = old.Name === undefined && n.name === n.type ? undefined : n.name
+      const hasInputs = Boolean(old.Inputs && Object.keys(old.Inputs).length > 0)
+      if (old.ID === local && old.Kind === n.type && old.Name === wantName && (hasInputs || old.Inputs === undefined)) {
+        return old
+      }
+      return {
+        ID: local, Kind: n.type, ...(wantName === undefined ? {} : { Name: wantName }),
+        ...(hasInputs ? { Inputs: old.Inputs } : {}),
+      }
+    }
     const merged = mergeInputs(config, n.inputs)
     const oldMerged = mergeInputs(splitInputs(old?.Inputs).literals, splitInputs(old?.Inputs).bindings)
+    const wantName = old?.Name === undefined && n.name === n.type ? undefined : n.name
+    const emptyInputs = Object.keys(merged).length === 0 && (!old?.Inputs || Object.keys(old.Inputs).length === 0)
+    const keepOldInputs = !emptyInputs && same(merged, oldMerged) && Boolean(old?.Inputs)
+    if (old && old.ID === local && old.Kind === n.type && old.Name === wantName && (keepOldInputs || (emptyInputs && old.Inputs === undefined))) {
+      return old
+    }
     return {
-      ID: local, Kind: n.type, ...(old?.Name === undefined && n.name === n.type ? {} : { Name: n.name }),
+      ID: local, Kind: n.type, ...(wantName === undefined ? {} : { Name: wantName }),
       // Inputs 为空时不写出，与后端 omitempty 一致，避免内容哈希无故变化。
-      ...(Object.keys(merged).length === 0 && (!old?.Inputs || Object.keys(old.Inputs).length === 0)
+      ...(emptyInputs
         ? {}
-        : same(merged, oldMerged) && old?.Inputs
-          ? { Inputs: old.Inputs }
+        : keepOldInputs
+          ? { Inputs: old!.Inputs }
           : Object.keys(merged).length
             ? { Inputs: merged }
             : {}),
@@ -306,9 +485,24 @@ function writeScope(scope: string, oldGraph: GraphJSON, oldLayout: ScopeLayout, 
     ...(Object.keys(rails).length ? { EdgeRails: rails } : {}),
     ...(Object.keys(subLayouts).length ? { SubLayouts: subLayouts } : {}),
   }
+  // 编辑模型 → 端点 ID：From 写成 fromNode.(when||Out)，To 写成 toNode.In（均为本地 ID）；未改动的边与数组保持原引用。
+  const mappedEdges = scopeEdges.map(({ id, from, to, when }, idx) => {
+    const eid = localIdOf(id)
+    const eFrom = formatEndpointID(localIdOf(from), when || GRAPH_DEFAULT_OUTPUT)
+    const eTo = formatEndpointID(localIdOf(to), GRAPH_DEFAULT_INPUT)
+    const prevEdge = oldGraph.Edges[idx]
+    if (prevEdge && prevEdge.ID === eid && prevEdge.From === eFrom && prevEdge.To === eTo) {
+      return prevEdge
+    }
+    return { ID: eid, From: eFrom, To: eTo }
+  })
+  const sameNodes = nodes.length === oldGraph.Nodes.length && nodes.every((node, i) => node === oldGraph.Nodes[i])
+  const sameEdges = mappedEdges.length === oldGraph.Edges.length && mappedEdges.every((edge, i) => edge === oldGraph.Edges[i])
   return {
-    // 编辑模型 → 端点 ID：From 写成 fromNode.(when||Out)，To 写成 toNode.In（均为本地 ID）。
-    graph: { Nodes: nodes, Edges: scopeEdges.map(({ id, from, to, when }) => ({ ID: localIdOf(id), From: formatEndpointID(localIdOf(from), when || GRAPH_DEFAULT_OUTPUT), To: formatEndpointID(localIdOf(to), GRAPH_DEFAULT_INPUT) })) },
+    graph: {
+      Nodes: sameNodes ? oldGraph.Nodes : nodes,
+      Edges: sameEdges ? oldGraph.Edges : mappedEdges,
+    },
     layout,
   }
 }

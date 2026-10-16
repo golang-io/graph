@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { RFNodeData } from './graph-adapter'
-import { isX6NodePayloadChanged, x6EdgeLineAttrs } from './x6-adapter'
+import { editorNodeToX6, isX6NodePayloadChanged, x6EdgeLineAttrs } from './x6-adapter'
+import { createNodeRegistry } from './node-registry'
 import { RUN_STATUS_COLOR, GRAPH_RUN_STROKE_WIDTH } from './edge-style'
 import type { Edge as RFEdge } from '@xyflow/react'
 
@@ -36,5 +37,29 @@ describe('x6EdgeLineAttrs', () => {
     expect(x6EdgeLineAttrs({ ...edge, data: { runStatus: 'succeeded' } }).stroke).toBe(RUN_STATUS_COLOR.succeeded)
     expect(x6EdgeLineAttrs({ ...edge, data: { runStatus: 'failed' } }).strokeWidth).toBe(GRAPH_RUN_STROKE_WIDTH)
     expect(x6EdgeLineAttrs({ ...edge, data: { runStatus: 'running' } }).strokeDasharray).toBe('8 4')
+  })
+})
+
+describe('editorNodeToX6', () => {
+  it('records rawEndpointSides alongside resolved endpointSides so fast-path comparison works when endpointSides is undefined', () => {
+    const reg = createNodeRegistry([
+      {
+        type: 'code',
+        role: 'step',
+        spec: { ID: 'code', Endpoints: { Inputs: ['In'], Outputs: ['Out'] } },
+      },
+    ])
+    const meta = editorNodeToX6(
+      {
+        id: 'n1',
+        type: 'code',
+        name: 'Code',
+        config: {},
+        position: { x: 10, y: 20 },
+      },
+      reg,
+    )
+    expect((meta.data as { rawEndpointSides?: unknown }).rawEndpointSides).toBeUndefined()
+    expect((meta.data as { endpointSides?: unknown }).endpointSides).toEqual({ In: 'left', Out: 'right' })
   })
 })

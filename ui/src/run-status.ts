@@ -39,6 +39,8 @@ export function buildRunStatusMaps(
 
   const completedNodes = new Set<string>()
   const errorExitNodes = new Set<string>()
+  // 记录多分支节点已确认走过的非 Error 出端点名（如 switch 的 Case1），避免直接连向已访问汇合点的未命中分支（如 Case0 -> M）被误染为 succeeded
+  const confirmedPort = new Map<string, string>()
 
   for (const run of runs ?? []) {
     for (const [nodeID, out] of Object.entries(run.Outputs ?? {})) {
@@ -52,26 +54,56 @@ export function buildRunStatusMaps(
     const status = normalizeRunStatus(run.Status)
     if (status) nodeStatus[run.NodeID] = status
     if (run.FromEdgeID) {
-      paintEdge(edgeById.get(run.FromEdgeID), status ?? 'succeeded')
+      const fromEdge = edgeById.get(run.FromEdgeID)
+      paintEdge(fromEdge, status ?? 'succeeded')
+      if (fromEdge) {
+        const from = parseEndpointID(fromEdge.From)
+        const port = from.name || 'Out'
+        if (port !== 'Error') confirmedPort.set(from.node, port)
+      }
     }
   }
+
+  const candidates: Array<{ edge: GraphEdgeJSON; fromNode: string; fromPort: string; toNode: string }> = []
+  const incomingCount = new Map<string, number>()
+
   for (const edge of edgeList) {
     if (edgeStatus[edge.ID] === 'running') {
       const status = nodeStatus[parseEndpointID(edge.To).node]
       if (status === 'succeeded' || status === 'failed') edgeStatus[edge.ID] = status
       continue
     }
-    // 历史走过的边（单路推进或汇合后 FromEdgeID 已被后续边覆盖）：
-    // 起点已成功离开且终点已被访问时，按出口类别（Error 出口 vs 正常出口）推断为 succeeded。
-    if (!edgeStatus[edge.ID]) {
-      const from = parseEndpointID(edge.From)
-      const to = parseEndpointID(edge.To)
-      const isErrorEdge = from.name === 'Error'
-      const tookPort = isErrorEdge ? errorExitNodes.has(from.node) : !errorExitNodes.has(from.node)
-      if (completedNodes.has(from.node) && tookPort && nodeStatus[to.node] != null) {
-        edgeStatus[edge.ID] = 'succeeded'
-      }
+    if (edgeStatus[edge.ID]) {
+      const toNode = parseEndpointID(edge.To).node
+      incomingCount.set(toNode, (incomingCount.get(toNode) ?? 0) + 1)
+      continue
     }
+    // 历史走过的边（单路推进或汇合后 FromEdgeID 已被后续边覆盖）：
+    // 起点已成功离开且终点已被访问时，按出口类别（Error 出口 vs 正常出口）作为候选。
+    const from = parseEndpointID(edge.From)
+    const to = parseEndpointID(edge.To)
+    const fromPort = from.name || 'Out'
+    const isErrorEdge = fromPort === 'Error'
+    const tookPort = isErrorEdge ? errorExitNodes.has(from.node) : !errorExitNodes.has(from.node)
+    if (completedNodes.has(from.node) && tookPort && nodeStatus[to.node] != null) {
+      candidates.push({ edge, fromNode: from.node, fromPort, toNode: to.node })
+      incomingCount.set(to.node, (incomingCount.get(to.node) ?? 0) + 1)
+    }
+  }
+
+  // 若某个已访问目标节点只有唯一一条候选入边，则该入边必然被走过，其起点必然走了对应的出端点
+  for (const c of candidates) {
+    if (c.fromPort !== 'Error' && incomingCount.get(c.toNode) === 1 && !confirmedPort.has(c.fromNode)) {
+      confirmedPort.set(c.fromNode, c.fromPort)
+    }
+  }
+
+  for (const c of candidates) {
+    const confirmed = confirmedPort.get(c.fromNode)
+    if (c.fromPort !== 'Error' && confirmed !== undefined && confirmed !== c.fromPort) {
+      continue
+    }
+    edgeStatus[c.edge.ID] = 'succeeded'
   }
   return { nodeStatus, nodeProgress, edgeStatus }
 }

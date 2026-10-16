@@ -31,7 +31,11 @@ const MAP_PARAM_NAMES = new Set(['List', 'Chunk', 'MaxParallel', BODY_INPUT])
 
 /** 循环体运行输入里由 map 固定提供的字段（后端 MapItemField / MapIndexField）。 */
 const MAP_PROVIDED: Record<string, GraphJSONSchema> = {
-  Item: { description: '本轮元素' },
+  // Item 元素类型由上游 List 决定，与后端 graph.AnyValueSchema 对齐。
+  Item: {
+    type: ['string', 'integer', 'number', 'boolean', 'object', 'array', 'null'],
+    description: '本轮元素',
+  },
   Index: { type: 'integer', description: '本轮第一个元素在 List 中的下标' },
 }
 
@@ -78,13 +82,21 @@ function bodyGraphOfInputs(inputs?: Record<string, GraphInputRef>): GraphJSON | 
  */
 export function bodyInputSchema(schema: GraphJSONSchema | undefined, containerInputNames: string[]): GraphJSONSchema {
   const want: Record<string, GraphJSONSchema> = { ...MAP_PROVIDED }
-  for (const name of containerInputNames) if (!MAP_PARAM_NAMES.has(name)) want[name] ??= {}
+  // 自定义输入默认 string；调用方随后可在运行参数面板改类型。
+  for (const name of containerInputNames) {
+    if (!MAP_PARAM_NAMES.has(name)) want[name] ??= { type: 'string' }
+  }
   const props = schema?.properties ?? {}
   const missing = Object.keys(want).filter((k) => !(k in props))
-  if (schema && missing.length === 0) return schema
+  if (schema && missing.length === 0) {
+    // 字段已齐全且根合法时原样返回，避免拖拽等无改动写回产生脏数据；
+    // 存量缺根 type / additionalProperties 时仍补齐（一次性迁移，下次写回即稳定）。
+    if (schema.additionalProperties === false && schema.type === 'object') return schema
+  }
   return {
     ...schema,
     type: 'object',
+    additionalProperties: false,
     properties: { ...props, ...Object.fromEntries(missing.map((k) => [k, want[k]])) },
   }
 }
@@ -134,12 +146,24 @@ export function fitContainers(
   sizeOf: (n: GraphEditorNode) => { w: number; h: number },
 ): Map<string, { w: number; h: number }> {
   const sizes = new Map<string, { w: number; h: number }>()
+  const containers = nodes.filter((n) => n.body === 'expanded')
+  if (containers.length === 0) return sizes
+
+  // 单次遍历按父作用域归组子节点，将多容器场景下的复杂度从 O(C * N) 降为 O(N)
+  const childrenByScope = new Map<string, GraphEditorNode[]>()
+  for (const child of nodes) {
+    const scope = scopeOf(child.id)
+    if (!scope) continue
+    const list = childrenByScope.get(scope)
+    if (list) list.push(child)
+    else childrenByScope.set(scope, [child])
+  }
+
   const depth = (id: string) => id.split(SCOPE_SEP).length
-  const containers = nodes.filter((n) => n.body === 'expanded').sort((a, b) => depth(b.id) - depth(a.id))
+  containers.sort((a, b) => depth(b.id) - depth(a.id))
   for (const c of containers) {
     let w = BODY_MIN_SIZE.w, h = BODY_MIN_SIZE.h
-    for (const child of nodes) {
-      if (scopeOf(child.id) !== c.id) continue
+    for (const child of childrenByScope.get(c.id) ?? []) {
       const s = sizes.get(child.id) ?? sizeOf(child)
       w = Math.max(w, child.position.x + s.w - c.position.x + BODY_PAD)
       h = Math.max(h, child.position.y + s.h - c.position.y + BODY_PAD)

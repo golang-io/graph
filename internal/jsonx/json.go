@@ -16,6 +16,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // 规范 JSON：同一份内容必须编码出同一串字节，否则内容寻址的哈希就不可信。
@@ -36,6 +37,186 @@ func Strict(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("graph: encode JSON: %w", err)
 	}
 	return encoded, nil
+}
+
+// CheckValid 按 Strict 规则直接在字节切片上校验 raw 是否为合法 JSON（拒绝空输入、重复 key、越界数字与尾随内容），
+// 不构造流式 json.Decoder，不分配中间值树。
+func CheckValid(raw []byte) error {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return fmt.Errorf("graph: empty JSON")
+	}
+	if !json.Valid(raw) {
+		return fmt.Errorf("graph: invalid JSON")
+	}
+	_, err := checkValidValue(raw, 0)
+	return err
+}
+
+// checkValidValue 在已通过 json.Valid 语法校验的字节切片上检查对象重复键与数字有效范围。
+func checkValidValue(raw []byte, i int) (int, error) {
+	i = skipWS(raw, i)
+	switch raw[i] {
+	case '{':
+		i = skipWS(raw, i+1)
+		if raw[i] == '}' {
+			return i + 1, nil
+		}
+		var smallRaw [16][]byte
+		smallCount := 0
+		var seen map[string]struct{}
+		for {
+			keyStart := i
+			keyEnd, hasEsc := scanString(raw, keyStart)
+			if !hasEsc && seen == nil && smallCount < len(smallRaw) {
+				keyBytes := raw[keyStart+1 : keyEnd-1]
+				for k := range smallCount {
+					if bytes.Equal(smallRaw[k], keyBytes) {
+						return 0, fmt.Errorf("graph: duplicate JSON key")
+					}
+				}
+				smallRaw[smallCount] = keyBytes
+				smallCount++
+			} else {
+				if seen == nil {
+					seen = make(map[string]struct{}, smallCount+4)
+					for k := range smallCount {
+						seen[string(smallRaw[k])] = struct{}{}
+					}
+				}
+				keyStr, err := decodeKeyString(raw[keyStart:keyEnd], hasEsc)
+				if err != nil {
+					return 0, err
+				}
+				if _, dup := seen[keyStr]; dup {
+					return 0, fmt.Errorf("graph: duplicate JSON key")
+				}
+				seen[keyStr] = struct{}{}
+			}
+			i = skipWS(raw, keyEnd)
+			i++ // ':'
+			var err error
+			i, err = checkValidValue(raw, i)
+			if err != nil {
+				return 0, err
+			}
+			i = skipWS(raw, i)
+			if raw[i] == '}' {
+				return i + 1, nil
+			}
+			i = skipWS(raw, i+1) // ','
+		}
+	case '[':
+		i = skipWS(raw, i+1)
+		if raw[i] == ']' {
+			return i + 1, nil
+		}
+		for {
+			var err error
+			i, err = checkValidValue(raw, i)
+			if err != nil {
+				return 0, err
+			}
+			i = skipWS(raw, i)
+			if raw[i] == ']' {
+				return i + 1, nil
+			}
+			i++ // ','
+		}
+	case '"':
+		end, _ := scanString(raw, i)
+		return end, nil
+	case 't', 'n':
+		return i + 4, nil
+	case 'f':
+		return i + 5, nil
+	default:
+		end := scanNumber(raw, i)
+		if err := checkNumberBytes(raw[i:end]); err != nil {
+			return 0, err
+		}
+		return end, nil
+	}
+}
+
+func skipWS(raw []byte, i int) int {
+	for i < len(raw) {
+		switch raw[i] {
+		case ' ', '\t', '\n', '\r':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+// scanString 从 raw[i] == '"' 扫描到闭合引号之后的位置，并报告字符串内是否含转义符 '\\'。
+func scanString(raw []byte, i int) (end int, hasEscape bool) {
+	i++ // skip opening '"'
+	for i < len(raw) {
+		c := raw[i]
+		if c == '"' {
+			return i + 1, hasEscape
+		}
+		if c == '\\' {
+			hasEscape = true
+			i += 2
+			continue
+		}
+		i++
+	}
+	return i, hasEscape
+}
+
+func scanNumber(raw []byte, i int) int {
+	for i < len(raw) {
+		c := raw[i]
+		if (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E' {
+			i++
+			continue
+		}
+		break
+	}
+	return i
+}
+
+func decodeKeyString(quoted []byte, hasEsc bool) (string, error) {
+	if !hasEsc {
+		return string(quoted[1 : len(quoted)-1]), nil
+	}
+	var s string
+	if err := json.Unmarshal(quoted, &s); err != nil {
+		return "", fmt.Errorf("graph: invalid JSON")
+	}
+	return s, nil
+}
+
+func checkNumberBytes(src []byte) error {
+	if len(src) > 64 {
+		return fmt.Errorf("graph: numeric literal out of range")
+	}
+	if !bytes.ContainsAny(src, ".eE") {
+		if _, err := strconv.ParseInt(string(src), 10, 64); err != nil {
+			return fmt.Errorf("graph: integer outside int64 range")
+		}
+		return nil
+	}
+	f, err := strconv.ParseFloat(string(src), 64)
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+		return fmt.Errorf("graph: non-finite JSON number")
+	}
+	if f == 0 {
+		for _, b := range src {
+			if b == 'e' || b == 'E' {
+				break
+			}
+			if b >= '1' && b <= '9' {
+				return fmt.Errorf("graph: non-finite JSON number")
+			}
+		}
+	}
+	return nil
 }
 
 // strictValue 按 Strict 的规则解出 JSON 值：对象为 map[string]any、数组为 []any，数字为归一化写法的 json.Number。
@@ -73,6 +254,9 @@ func CanonicalObject(m map[string]any) (map[string]any, error) {
 	if m == nil {
 		return nil, nil
 	}
+	if fast, ok := canonicalMapFast(m); ok {
+		return fast, nil
+	}
 	raw, err := json.Marshal(m)
 	if err != nil {
 		return nil, fmt.Errorf("graph: value is not JSON serializable: %v", err)
@@ -86,6 +270,57 @@ func CanonicalObject(m map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// canonicalMapFast 对只包含标准动态类型（nil、bool、合法 UTF-8 string、int/int64、map[string]any、[]any）的 map
+// 直接深拷贝并规整整数为 int64，省去 JSON 序列化与反序列化往返；遇到其他类型时返回 false 交由完整路径处理。
+func canonicalMapFast(m map[string]any) (map[string]any, bool) {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		if !utf8.ValidString(k) {
+			return nil, false
+		}
+		cv, ok := canonicalValueFast(v)
+		if !ok {
+			return nil, false
+		}
+		out[k] = cv
+	}
+	return out, true
+}
+
+func canonicalValueFast(v any) (any, bool) {
+	switch x := v.(type) {
+	case nil, bool, int64:
+		return x, true
+	case int:
+		return int64(x), true
+	case string:
+		if !utf8.ValidString(x) {
+			return nil, false
+		}
+		return x, true
+	case map[string]any:
+		if x == nil {
+			return nil, true
+		}
+		return canonicalMapFast(x)
+	case []any:
+		if x == nil {
+			return nil, true
+		}
+		out := make([]any, len(x))
+		for i, item := range x {
+			cv, ok := canonicalValueFast(item)
+			if !ok {
+				return nil, false
+			}
+			out[i] = cv
+		}
+		return out, true
+	default:
+		return nil, false
+	}
 }
 
 // readJSONValue 逐个 token 读出一个 JSON 值：对象拒绝重复 key，数字归一化写法。
@@ -149,70 +384,22 @@ func readJSONValue(dec *json.Decoder) (any, error) {
 	return nil, fmt.Errorf("graph: unsupported JSON token")
 }
 
-// normalizeNumber 归一化数字写法，并拒绝无法无损往返的精度。
+// normalizeNumber 归一化数字写法，并校验 int64 / float64 有效范围。
 func normalizeNumber(src string) (string, error) {
-	out, err := decimalSpelling(src)
-	if err != nil {
-		return "", err
+	if len(src) > 64 {
+		return "", fmt.Errorf("graph: numeric literal out of range")
 	}
-	if !strings.Contains(out, ".") {
-		if _, err = strconv.ParseInt(out, 10, 64); err != nil {
+	if !strings.ContainsAny(src, ".eE") {
+		n, err := strconv.ParseInt(src, 10, 64)
+		if err != nil {
 			return "", fmt.Errorf("graph: integer outside int64 range")
 		}
-		return out, nil
+		return strconv.FormatInt(n, 10), nil
 	}
-	f, err := strconv.ParseFloat(out, 64)
-	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+	f, err := strconv.ParseFloat(src, 64)
+	mantissa, _, _ := strings.Cut(strings.ToLower(src), "e")
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) || (f == 0 && strings.ContainsAny(mantissa, "123456789")) {
 		return "", fmt.Errorf("graph: non-finite JSON number")
 	}
-	roundtrip, err := decimalSpelling(strconv.FormatFloat(f, 'g', -1, 64))
-	if err != nil || roundtrip != out {
-		return "", fmt.Errorf("graph: unsupported JSON decimal precision")
-	}
-	return out, nil
-}
-
-// decimalSpelling 把科学计数法与冗余零展开成唯一的十进制写法。
-func decimalSpelling(src string) (string, error) {
-	negative := strings.HasPrefix(src, "-")
-	src = strings.TrimPrefix(src, "-")
-	exponent := 0
-	if i := strings.IndexAny(src, "eE"); i >= 0 {
-		n, err := strconv.Atoi(src[i+1:])
-		if err != nil {
-			return "", fmt.Errorf("graph: invalid numeric exponent")
-		}
-		exponent = n
-		src = src[:i]
-	}
-	point := len(src)
-	if i := strings.IndexByte(src, '.'); i >= 0 {
-		point = i
-		src = src[:i] + src[i+1:]
-	}
-	point += exponent
-	var out string
-	if point <= 0 {
-		out = "0." + strings.Repeat("0", -point) + src
-	} else if point >= len(src) {
-		out = src + strings.Repeat("0", point-len(src))
-	} else {
-		out = src[:point] + "." + src[point:]
-	}
-	parts := strings.SplitN(out, ".", 2)
-	parts[0] = strings.TrimLeft(parts[0], "0")
-	if parts[0] == "" {
-		parts[0] = "0"
-	}
-	out = parts[0]
-	if len(parts) == 2 {
-		fraction := strings.TrimRight(parts[1], "0")
-		if fraction != "" {
-			out += "." + fraction
-		}
-	}
-	if negative && out != "0" {
-		out = "-" + out
-	}
-	return out, nil
+	return strconv.FormatFloat(f, 'g', -1, 64), nil
 }

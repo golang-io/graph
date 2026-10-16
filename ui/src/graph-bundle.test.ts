@@ -87,7 +87,7 @@ describe('parseGraphBundle', () => {
       InputSchema: {
         type: 'object',
         required: ['q'],
-        properties: { q: {}, opt: {} },
+        properties: { q: { type: 'string' }, opt: { type: 'string' } },
         additionalProperties: false,
       },
       Nodes: [

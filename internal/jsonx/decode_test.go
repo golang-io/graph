@@ -2,10 +2,11 @@ package jsonx
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
-// TestDecodePreservesDynamicNumbers 确认动态值里的大整数保持 int64，且重复键、越界整数、尾随值被拒绝。
+// TestDecodePreservesDynamicNumbers 确认动态值里的大整数保持 int64，且重复键、越界整数、极端指数、超长字面量与尾随值被拒绝。
 func TestDecodePreservesDynamicNumbers(t *testing.T) {
 	var target struct {
 		Vars map[string]any  `json:"vars"`
@@ -23,7 +24,16 @@ func TestDecodePreservesDynamicNumbers(t *testing.T) {
 	if string(target.Raw) != `{"n":9007199254740993}` {
 		t.Fatalf("raw=%s", target.Raw)
 	}
-	for _, raw := range []string{`{"n":1,"n":2}`, `{"n":9223372036854775808}`, `{"n":1} {}`} {
+	for _, raw := range []string{
+		`{"n":1,"n":2}`,
+		`{"n":9223372036854775808}`,
+		`{"n":1} {}`,
+		`{"x":1e1000000000}`,
+		`{"x":1e-1000000000}`,
+		`{"x":1e9223372036854775807}`,
+		`{"x":1e-9223372036854775808}`,
+		`{"x":0.` + strings.Repeat("0", 100) + `1}`,
+	} {
 		var object map[string]any
 		if err := Decode([]byte(raw), &object); err == nil {
 			t.Fatalf("accepted %s", raw)

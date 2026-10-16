@@ -2,16 +2,15 @@ package graph
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"github.com/expr-lang/expr"
-	"github.com/expr-lang/expr/ast"
-	"github.com/expr-lang/expr/parser"
 	"github.com/expr-lang/expr/types"
 	"github.com/expr-lang/expr/vm"
 )
@@ -23,25 +22,61 @@ import (
 // Shared {{expr}} hole matcher for template rendering.
 var TemplateHoleRE = regexp.MustCompile(`(?s)\{\{(.*?)\}\}`)
 
+// maxExprVariants 限制单个表达式原文最多缓存的变量类型签名数量，防止极端动态变量集合下缓存无限增长。
+const maxExprVariants = 16
+
+// exprVarType 记录运行期变量表中单个键及其顶层动态类型（值为 nil 时 typ 为 nil）。
+// expr.Env(map[string]any) 的编译结果完全由顶层键集合与各键的 reflect.Type 唯一决定。
+type exprVarType struct {
+	name string
+	typ  reflect.Type
+}
+
+type exprVariant struct {
+	vars    []exprVarType
+	program *vm.Program
+	err     error
+}
+
+type exprBucket struct {
+	mu       sync.RWMutex
+	variants []exprVariant
+}
+
+type validateExprEntry struct {
+	err error
+}
+
+type validateWithVariant struct {
+	names []string
+	err   error
+}
+
+type validateWithBucket struct {
+	mu       sync.RWMutex
+	variants []validateWithVariant
+}
+
+var (
+	evalExprCache         sync.Map // normalized src (string) -> *exprBucket
+	validateExprCache     sync.Map // normalized src (string) -> validateExprEntry
+	validateExprWithCache sync.Map // normalized src (string) -> *validateWithBucket
+)
+
 // EvalExpr 求值表达式（code / 条件 / 插值括号内内容）。
 // 允许整串外包一层 {{…}}。变量必须出现在 vars 里，内置函数与运算符走 expr-lang 默认集合。
-//
-// 编译结果按「表达式原文 + 所引用变量的类型」缓存：类型检查（未定义变量、类型不匹配）
-// 与每次重新编译完全一致，只是相同类型组合下不再重复编译。
-//
-// EvalExpr compiles with expr.Env(vars) semantics; programs are cached per source and
-// per types of the referenced variables, so results and errors match a fresh compile.
+// 编译产出的字节码按「规整后原文 + 顶层变量名与动态类型签名」缓存复用，相同类型签名下零重复编译开销。
 func EvalExpr(src string, vars map[string]any) (any, error) {
-	e := lookupExpr(src)
-	if e.prepErr != nil {
-		return nil, e.prepErr
+	src, err := prepareExprSrc(src)
+	if err != nil {
+		return nil, err
 	}
 	if vars == nil {
 		vars = map[string]any{}
 	}
-	program, err := e.program(vars)
+	program, err := evalExprProgram(src, vars)
 	if err != nil {
-		return nil, fmt.Errorf("expr: %w", err)
+		return nil, err
 	}
 	out, err := expr.Run(program, vars)
 	if err != nil {
@@ -50,165 +85,153 @@ func EvalExpr(src string, vars map[string]any) (any, error) {
 	return out, nil
 }
 
-// ValidateExpr 在定义期检查表达式能否被 expr-lang 编译。
-// 此时还没有运行期变量，未声明的名字留给求值时再按 env 检查。
-// 检查结果只依赖原文，按原文缓存。
-func ValidateExpr(src string) error {
-	e := lookupExpr(src)
-	if e.prepErr != nil {
-		return e.prepErr
-	}
-	e.validateOnce.Do(func() {
-		if _, err := expr.Compile(e.src, expr.AllowUndefinedVariables(), expr.AsAny()); err != nil {
-			e.validateErr = fmt.Errorf("expr: %w", err)
-		}
-	})
-	return e.validateErr
-}
-
-// ValidateExprWith 在定义期按名字环境检查表达式：names 中的名字作为类型未知的变量，
-// 其他标识符（未声明的变量）一律报错；expr-lang 内置函数与运算符不受影响。
-// 只在保存图与编译时调用，不缓存。
-//
-// ValidateExprWith compiles src in a strict env whose variables are exactly names (typed as any).
-func ValidateExprWith(src string, names []string) error {
-	e := lookupExpr(src)
-	if e.prepErr != nil {
-		return e.prepErr
-	}
-	env := make(types.Map, len(names))
-	for _, name := range names {
-		env[name] = types.Any
-	}
-	if _, err := expr.Compile(e.src, expr.Env(env), expr.AsAny()); err != nil {
-		return fmt.Errorf("expr: %w", err)
-	}
-	return nil
-}
-
-// exprCache 按原文（未规整）缓存 *exprEntry。表达式来自图定义，数量随定义增长。
-var exprCache sync.Map
-
-// exprEntry 是一条表达式原文的缓存：规整结果、引用的标识符、定义期检查结果，以及按变量类型区分的编译结果。
-type exprEntry struct {
-	src     string // 规整后的原文
-	prepErr error  // 规整失败（空串）时的错误，原样返回
-	// idents 是原文中出现的全部标识符（变量名，也可能含 let 局部名、函数名）。
-	// 它是「影响类型检查的变量」的超集：多出来的名字只会让缓存键更细，不会让结果出错。
-	idents []string
-	// dynamic 为 true 表示不能按 idents 缓存：解析失败（交给 expr.Compile 给出原有错误），
-	// 或原文使用了 $env（类型检查依赖整个变量表）。
-	dynamic bool
-
-	validateOnce sync.Once
-	validateErr  error
-
-	variants atomic.Pointer[[]exprVariant] // 只追加的副本切片，读取无锁
-}
-
-// exprVariant 是一种变量类型组合下的编译结果；编译错误同样缓存，避免对失败的表达式反复编译。
-type exprVariant struct {
-	types   []reflect.Type // 与 idents 一一对应；变量不存在时为 missingVarType
-	program *vm.Program
-	err     error
-}
-
-// missingVar 只用于标记「变量不存在」，与「变量存在且值为 nil」（类型为 nil）区分。
-type missingVar struct{}
-
-var missingVarType = reflect.TypeFor[missingVar]()
-
-// lookupExpr 返回原文对应的缓存项，首次出现时规整并写入缓存。
-func lookupExpr(raw string) *exprEntry {
-	if v, ok := exprCache.Load(raw); ok {
-		return v.(*exprEntry)
-	}
-	v, _ := exprCache.LoadOrStore(raw, newExprEntry(raw))
-	return v.(*exprEntry)
-}
-
-// newExprEntry 规整原文并收集其中的标识符。
-func newExprEntry(raw string) *exprEntry {
-	src, err := prepareExprSrc(raw)
-	if err != nil {
-		return &exprEntry{prepErr: err}
-	}
-	e := &exprEntry{src: src}
-	tree, err := parser.Parse(src)
-	if err != nil {
-		e.dynamic = true
-		return e
-	}
-	c := &identCollector{seen: map[string]bool{}}
-	ast.Walk(&tree.Node, c)
-	e.idents, e.dynamic = c.names, c.seen["$env"]
-	return e
-}
-
-// identCollector 收集语法树中所有 IdentifierNode 的名字（去重，保持首次出现顺序）。
-type identCollector struct {
-	seen  map[string]bool
-	names []string
-}
-
-// Visit 实现 ast.Visitor。
-func (c *identCollector) Visit(node *ast.Node) {
-	if id, ok := (*node).(*ast.IdentifierNode); ok && !c.seen[id.Value] {
-		c.seen[id.Value] = true
-		c.names = append(c.names, id.Value)
-	}
-}
-
-// program 返回 vars 当前类型组合下的编译结果：命中缓存直接返回，否则按 expr.Env(vars) 编译并记录。
-func (e *exprEntry) program(vars map[string]any) (*vm.Program, error) {
-	if e.dynamic {
-		return expr.Compile(e.src, expr.Env(vars), expr.AsAny())
-	}
-	if list := e.variants.Load(); list != nil {
-		for _, v := range *list {
-			if e.sameTypes(v.types, vars) {
-				return v.program, v.err
+// evalExprProgram 按表达式原文与 vars 的顶层类型签名获取或编译 *vm.Program。
+func evalExprProgram(src string, vars map[string]any) (*vm.Program, error) {
+	var bucket *exprBucket
+	if v, ok := evalExprCache.Load(src); ok {
+		bucket = v.(*exprBucket)
+		bucket.mu.RLock()
+		for i := range bucket.variants {
+			variant := &bucket.variants[i]
+			if matchExprVars(variant.vars, vars) {
+				prog, err := variant.program, variant.err
+				bucket.mu.RUnlock()
+				return prog, err
 			}
 		}
+		bucket.mu.RUnlock()
+	} else {
+		actual, _ := evalExprCache.LoadOrStore(src, &exprBucket{})
+		bucket = actual.(*exprBucket)
 	}
-	program, err := expr.Compile(e.src, expr.Env(vars), expr.AsAny())
-	types := make([]reflect.Type, len(e.idents))
-	for i, name := range e.idents {
-		types[i] = varType(vars, name)
+
+	program, compileErr := expr.Compile(src, expr.Env(vars), expr.AsAny())
+	if compileErr != nil {
+		compileErr = fmt.Errorf("expr: %w", compileErr)
 	}
-	// 写时复制追加；并发编译同一组合时可能重复追加，读取时取第一条，结果相同。
-	for {
-		old := e.variants.Load()
-		var next []exprVariant
-		if old != nil {
-			next = append(slices.Clone(*old), exprVariant{types, program, err})
-		} else {
-			next = []exprVariant{{types, program, err}}
+	sig := buildExprVarSignature(vars)
+
+	bucket.mu.Lock()
+	for i := range bucket.variants {
+		if matchExprVars(bucket.variants[i].vars, vars) {
+			prog, err := bucket.variants[i].program, bucket.variants[i].err
+			bucket.mu.Unlock()
+			return prog, err
 		}
-		if e.variants.CompareAndSwap(old, &next) {
-			break
+	}
+	if len(bucket.variants) < maxExprVariants {
+		bucket.variants = append(bucket.variants, exprVariant{
+			vars:    sig,
+			program: program,
+			err:     compileErr,
+		})
+	} else {
+		bucket.variants[len(bucket.variants)-1] = exprVariant{
+			vars:    sig,
+			program: program,
+			err:     compileErr,
 		}
 	}
-	return program, err
+	bucket.mu.Unlock()
+	return program, compileErr
 }
 
-// sameTypes 判断 vars 中各标识符的类型是否与缓存记录一致。
-func (e *exprEntry) sameTypes(types []reflect.Type, vars map[string]any) bool {
-	for i, name := range e.idents {
-		if varType(vars, name) != types[i] {
+// matchExprVars 判断 vars 的键集合与各键的动态类型是否与签名 sig 完全一致（全程零分配）。
+func matchExprVars(sig []exprVarType, vars map[string]any) bool {
+	if len(sig) != len(vars) {
+		return false
+	}
+	for _, vt := range sig {
+		val, ok := vars[vt.name]
+		if !ok || reflect.TypeOf(val) != vt.typ {
 			return false
 		}
 	}
 	return true
 }
 
-// varType 返回变量值的动态类型；变量不存在时返回 missingVarType。
-func varType(vars map[string]any, name string) reflect.Type {
-	v, ok := vars[name]
-	if !ok {
-		return missingVarType
+// buildExprVarSignature 构造 vars 的有序类型签名，仅在首次编译未命中缓存时调用。
+func buildExprVarSignature(vars map[string]any) []exprVarType {
+	if len(vars) == 0 {
+		return nil
 	}
-	return reflect.TypeOf(v)
+	keys := slices.Sorted(maps.Keys(vars))
+	sig := make([]exprVarType, len(keys))
+	for i, k := range keys {
+		sig[i] = exprVarType{name: k, typ: reflect.TypeOf(vars[k])}
+	}
+	return sig
+}
+
+// ValidateExpr 在定义期检查表达式能否被 expr-lang 编译。
+// 此时还没有运行期变量，未声明的名字留给求值时再按 env 检查。
+func ValidateExpr(src string) error {
+	src, err := prepareExprSrc(src)
+	if err != nil {
+		return err
+	}
+	if v, ok := validateExprCache.Load(src); ok {
+		return v.(validateExprEntry).err
+	}
+	var compileErr error
+	if _, err := expr.Compile(src, expr.AllowUndefinedVariables(), expr.AsAny()); err != nil {
+		compileErr = fmt.Errorf("expr: %w", err)
+	}
+	validateExprCache.Store(src, validateExprEntry{err: compileErr})
+	return compileErr
+}
+
+// ValidateExprWith 在定义期按名字环境检查表达式：names 中的名字作为类型未知的变量，
+// 其他标识符（未声明的变量）一律报错；expr-lang 内置函数与运算符不受影响。
+//
+// ValidateExprWith compiles src in a strict env whose variables are exactly names (typed as any).
+func ValidateExprWith(src string, names []string) error {
+	src, err := prepareExprSrc(src)
+	if err != nil {
+		return err
+	}
+	var bucket *validateWithBucket
+	if v, ok := validateExprWithCache.Load(src); ok {
+		bucket = v.(*validateWithBucket)
+		bucket.mu.RLock()
+		for i := range bucket.variants {
+			if slices.Equal(bucket.variants[i].names, names) {
+				cachedErr := bucket.variants[i].err
+				bucket.mu.RUnlock()
+				return cachedErr
+			}
+		}
+		bucket.mu.RUnlock()
+	} else {
+		actual, _ := validateExprWithCache.LoadOrStore(src, &validateWithBucket{})
+		bucket = actual.(*validateWithBucket)
+	}
+
+	env := make(types.Map, len(names))
+	for _, name := range names {
+		env[name] = types.Any
+	}
+	var compileErr error
+	if _, err := expr.Compile(src, expr.Env(env), expr.AsAny()); err != nil {
+		compileErr = fmt.Errorf("expr: %w", err)
+	}
+
+	bucket.mu.Lock()
+	for i := range bucket.variants {
+		if slices.Equal(bucket.variants[i].names, names) {
+			cachedErr := bucket.variants[i].err
+			bucket.mu.Unlock()
+			return cachedErr
+		}
+	}
+	clonedNames := slices.Clone(names)
+	if len(bucket.variants) < maxExprVariants {
+		bucket.variants = append(bucket.variants, validateWithVariant{names: clonedNames, err: compileErr})
+	} else {
+		bucket.variants[len(bucket.variants)-1] = validateWithVariant{names: clonedNames, err: compileErr}
+	}
+	bucket.mu.Unlock()
+	return compileErr
 }
 
 func prepareExprSrc(src string) (string, error) {
@@ -228,20 +251,55 @@ func normalizeExprSrc(src string) string {
 	return src
 }
 
-// RenderTemplate 文案插值：扫描 {{…}}，括号内 EvalExpr，拼回字符串。
+// RenderTemplate 文案插值：线性扫描 {{…}}，括号内 EvalExpr，拼回字符串。
 // 求值失败或结果为 nil → 空串（避免打断整段文案）。
 func RenderTemplate(tpl string, vars map[string]any) string {
-	if !strings.Contains(tpl, "{{") {
+	open := strings.Index(tpl, "{{")
+	if open < 0 {
 		return tpl
 	}
-	return TemplateHoleRE.ReplaceAllStringFunc(tpl, func(m string) string {
-		if len(m) < 4 {
-			return ""
+	if !strings.Contains(tpl[open+2:], "}}") {
+		return tpl
+	}
+	var b strings.Builder
+	b.Grow(len(tpl))
+	pos := 0
+	for {
+		b.WriteString(tpl[pos : pos+open])
+		holeStart := pos + open + 2
+		closeRel := strings.Index(tpl[holeStart:], "}}")
+		if closeRel < 0 {
+			b.WriteString(tpl[pos+open:])
+			break
 		}
-		v, err := EvalExpr(m[2:len(m)-2], vars)
-		if err != nil || v == nil {
-			return ""
+		hole := tpl[holeStart : holeStart+closeRel]
+		if v, err := EvalExpr(hole, vars); err == nil && v != nil {
+			writeTemplateValue(&b, v)
 		}
-		return fmt.Sprint(v)
-	})
+		pos = holeStart + closeRel + 2
+		if pos >= len(tpl) {
+			break
+		}
+		open = strings.Index(tpl[pos:], "{{")
+		if open < 0 {
+			b.WriteString(tpl[pos:])
+			break
+		}
+	}
+	return b.String()
+}
+
+func writeTemplateValue(b *strings.Builder, v any) {
+	switch x := v.(type) {
+	case string:
+		b.WriteString(x)
+	case int64:
+		b.WriteString(strconv.FormatInt(x, 10))
+	case int:
+		b.WriteString(strconv.Itoa(x))
+	case bool:
+		b.WriteString(strconv.FormatBool(x))
+	default:
+		b.WriteString(fmt.Sprint(v))
+	}
 }

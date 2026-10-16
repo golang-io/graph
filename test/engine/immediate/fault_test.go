@@ -195,44 +195,6 @@ func TestCloseCancelsTasks(t *testing.T) {
 	}
 }
 
-// 全局名额用尽时，其他 Task 的活动节点保持 PENDING，名额释放后才置为 RUNNING。
-func TestGlobalActivityLimit(t *testing.T) {
-	ctx := context.Background()
-	started, release := make(chan string, 2), make(chan struct{})
-	eng, _ := openProbe(t, immediate.Options{MaxActivities: 1}, blocking(started, release))
-	first, err := eng.Start(ctx, engine.StartRequest{Graph: probeGraph()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id := <-started; id != first.TaskID {
-		t.Fatalf("started %s, want %s", id, first.TaskID)
-	}
-	second, err := eng.Start(ctx, engine.StartRequest{Graph: probeGraph()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case id := <-started:
-		t.Fatalf("task %s started beyond MaxActivities", id)
-	case <-time.After(100 * time.Millisecond):
-	}
-	s, err := eng.Snapshot(ctx, second.TaskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, r := range s.Runs {
-		if r.NodeID == "work" && r.Status != graph.PENDING {
-			t.Fatalf("queued run is %s, want PENDING", r.Status)
-		}
-	}
-	close(release)
-	if id := <-started; id != second.TaskID {
-		t.Fatalf("started %s, want %s", id, second.TaskID)
-	}
-	snapshot(t, eng, first.TaskID, graph.SUCCEEDED)
-	snapshot(t, eng, second.TaskID, graph.SUCCEEDED)
-}
-
 // 没有数据库时，已结束的 Task 在保留期后移出内存，之后查询返回 ErrNotFound。
 func TestRetainWithoutDB(t *testing.T) {
 	ctx := context.Background()
@@ -288,10 +250,9 @@ func TestRetainZero(t *testing.T) {
 	}
 }
 
-// 超过 MaxRetainedTasks 时按 LRU 自动淘汰最老完成的任务；查询命中刷新其 LRU 位置。
-func TestMaxRetainedTasksLRU(t *testing.T) {
+// 超过 MaxRetainedTasks 时按完成先后顺序（FIFO）自动淘汰最老完成的任务。
+func TestMaxRetainedTasksCap(t *testing.T) {
 	ctx := context.Background()
-	// 保留上限为 3，保留时长 1 分钟（避免时间到期影响断言）
 	eng := immediate.New(engine.EngineConfig{Nodes: registry(t)}, immediate.Options{
 		Retain:           time.Minute,
 		MaxRetainedTasks: 3,
@@ -313,45 +274,21 @@ func TestMaxRetainedTasksLRU(t *testing.T) {
 	t2 := startAndFinish()
 	t3 := startAndFinish()
 
-	// 此时 t1, t2, t3 都在内存中
 	for _, id := range []string{t1, t2, t3} {
 		if s, err := eng.Snapshot(ctx, id); err != nil || s.Task.Status != graph.SUCCEEDED {
 			t.Fatalf("task %s not retained: %v", id, err)
 		}
 	}
 
-	// 此时访问 t1，将其刷新到 LRU 队首（最常使用）
-	// LRU 顺序变为（最近使用 -> 最久未用）：t1, t3, t2
-	if _, err := eng.Snapshot(ctx, t1); err != nil {
-		t.Fatalf("snapshot t1 err = %v", err)
-	}
-
-	// 启动并完成第 4 个 Task：t4
-	// 容量上限为 3，应淘汰最老未访问的任务 t2
+	// 启动并完成第 4 个 Task：容量上限为 3，最老完成的 t1 被淘汰，t2、t3、t4 保留。
 	t4 := startAndFinish()
-
-	// 校验：t2 应被淘汰，t1, t3, t4 应仍保留
-	if _, err := eng.Snapshot(ctx, t2); !errors.Is(err, engine.ErrNotFound) {
-		t.Fatalf("t2 should be evicted, err = %v", err)
+	if _, err := eng.Snapshot(ctx, t1); !errors.Is(err, engine.ErrNotFound) {
+		t.Fatalf("t1 should be evicted, err = %v", err)
 	}
-	for _, id := range []string{t1, t3, t4} {
+	for _, id := range []string{t2, t3, t4} {
 		if s, err := eng.Snapshot(ctx, id); err != nil || s.Task.Status != graph.SUCCEEDED {
 			t.Fatalf("task %s should be retained: %v", id, err)
 		}
-	}
-
-	// 启动并完成第 5 个 Task：t5
-	// 启动 t5 后，容量上限依然为 3，池中应严格只有 3 个任务
-	_ = startAndFinish()
-
-	survivors := 0
-	for _, id := range []string{t1, t2, t3, t4} {
-		if _, err := eng.Snapshot(ctx, id); err == nil {
-			survivors++
-		}
-	}
-	if survivors != 2 { // t2 already evicted, and one more evicted when t5 finished
-		t.Fatalf("expected exactly 2 of {t1, t3, t4} to survive, got %d", survivors)
 	}
 }
 
@@ -511,4 +448,3 @@ func TestCloseTimeoutAndRetry(t *testing.T) {
 	}
 	_ = rec
 }
-

@@ -148,10 +148,17 @@ func G(nodes []graph.Node, edges ...graph.Edge) graph.Graph {
 	return PrependStart(graph.Graph{Nodes: nodes, Edges: edges})
 }
 
-// GI 构造声明了运行输入的图；names 中的输入都为必填。
+// GI 构造声明了运行输入的图；names 中的输入都为必填，类型为任意 JSON 值（测试快捷方式）。
 func GI(names []string, nodes []graph.Node, edges ...graph.Edge) graph.Graph {
 	g := G(nodes, edges...)
-	g.InputSchema = graph.RunInputSchema(names...)
+	if len(names) == 0 {
+		return g
+	}
+	props := make(map[string]*jsonschema.Schema, len(names))
+	for _, name := range names {
+		props[name] = graph.AnyValueSchema()
+	}
+	g.InputSchema = graph.RunInputSchema(props)
 	return g
 }
 

@@ -18,7 +18,11 @@ type TemplateInput struct {
 }
 
 func (c TemplateInput) Validate() error {
-	return checkOutputTexts(c.Outputs, true, graph.ValidateTemplate)
+	return checkOutKVs(c.Outputs, true)
+}
+
+func (c TemplateInput) HasOutput(field string) bool {
+	return hasOutKVKey(c.Outputs, field)
 }
 
 func (c TemplateInput) DeclareOutputs() *jsonschema.Schema {
