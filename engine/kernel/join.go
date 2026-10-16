@@ -137,7 +137,8 @@ func hasDynamicInput(inputs map[string]graph.InputRef) bool {
 	return false
 }
 
-// hasTriggered 报告汇合节点 nodeID 在本次 Task 中是否已被触发（已执行完成并写入 Outputs，或已通过汇合门控正停在调试断点上）。
+// hasTriggered 报告汇合节点是否已完成或已通过门控（含活动执行、重试延迟与子任务等待）。
+// Seq=0 的 Run 是 fork 预建但尚未 enter 的分支，WAITING(join) 尚未通过门控，都不算触发。
 func (st *state) hasTriggered(nodeID, excludeRunID string) bool {
 	for _, other := range st.runs {
 		if other.RunID == excludeRunID {
@@ -146,8 +147,15 @@ func (st *state) hasTriggered(nodeID, excludeRunID string) bool {
 		if other.Outputs[nodeID] != nil {
 			return true
 		}
-		if other.NodeID == nodeID && other.Status == graph.WAITING && other.WaitReason == engine.WaitDebug {
-			return true
+		if other.NodeID == nodeID && other.Seq > 0 {
+			switch other.Status {
+			case graph.PENDING, graph.RUNNING:
+				return true
+			case graph.WAITING:
+				if other.WaitReason == engine.WaitDebug || other.WaitReason == engine.WaitSubgraph {
+					return true
+				}
+			}
 		}
 	}
 	return false

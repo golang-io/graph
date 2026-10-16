@@ -16,6 +16,7 @@ import (
 
 	"github.com/golang-io/graph"
 	"github.com/golang-io/graph/engine"
+	"github.com/golang-io/graph/node"
 	"github.com/golang-io/graph/node/builtin"
 	"github.com/google/jsonschema-go/jsonschema"
 	"gorm.io/gorm"
@@ -69,10 +70,10 @@ func (e *env) resolve(_ context.Context, id string) (graph.Graph, error) {
 
 // setup 通过 open 取得一个空库、构造引擎，测试结束时关闭引擎（连接由 open 的提供方关闭）。
 // 后台调度（如 durable 的 worker 与租约回收）属于引擎生命周期：Builder 返回时已启动，Close 时停止。
-func setup(t *testing.T, open OpenDB, build engine.Builder) *env {
+func setup(t *testing.T, open OpenDB, build engine.Builder, extra ...node.Node) *env {
 	t.Helper()
 	db := open(t)
-	reg, err := Registry(OpSpec())
+	reg, err := Registry(append([]node.Node{OpSpec()}, extra...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,6 +229,7 @@ func Run(t *testing.T, open OpenDB, build engine.Builder, opts ...Option) {
 	for _, mode := range []string{graph.ExecSerial, graph.ExecParallel} {
 		t.Run(mode, func(t *testing.T) { runAll(t, open, build, engine.TaskPolicy{ExecutionMode: mode}, c) })
 	}
+	t.Run("Ownership", func(t *testing.T) { runOwnership(t, open, build) })
 }
 
 func runAll(t *testing.T, open OpenDB, build engine.Builder, base engine.TaskPolicy, c *config) {

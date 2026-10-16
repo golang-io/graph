@@ -253,16 +253,20 @@ func (e *Engine) execute(j *job) (*batch, error) {
 	}
 	a, err := kernel.NewActivity(e.cfg.Nodes, t, &r.Run)
 	if err != nil {
-		stop()
 		return e.event(context.Background(), j.TaskID, owned(j, func(*DurableRun) act { return act{fail: err} }))
 	}
 
 	out, runErr := a.Run(ctx)
+	if ctx.Err() != nil {
+		return nil, nil
+	}
+	// Result 落盘前仍需续租：序列化、连接等待和写入都可能超过剩余租约。
+	// 保存后恢复扫描可以直接应用结果，不必重新执行节点，此时才停止续租。
+	saved, err := e.saveResult(ctx, j, a.Done(out, runErr))
 	stop()
 	if e.life.Err() != nil {
 		return nil, nil
 	}
-	saved, err := e.saveResult(j, a.Done(out, runErr))
 	if err != nil || !saved {
 		// 保存失败时 Run 保持 RUNNING、没有结果，由租约过期回收（与进程退出相同）；未命中说明已不由本次领取持有。
 		return nil, err
@@ -272,8 +276,8 @@ func (e *Engine) execute(j *job) (*batch, error) {
 
 // saveResult 把执行结果写入本次领取持有的 Run：单行条件更新（RUNNING 且 LeaseToken 一致），不锁 Task 行，
 // 因此不与其他 worker 的写回竞争。返回 false 表示 Run 已不由本次领取持有（已取消、落选或租约已被回收），结果丢弃。
-func (e *Engine) saveResult(j *job, d kernel.ActivityDone) (bool, error) {
-	res := e.cfg.DB.Model(&DurableRun{}).
+func (e *Engine) saveResult(ctx context.Context, j *job, d kernel.ActivityDone) (bool, error) {
+	res := e.cfg.DB.WithContext(ctx).Model(&DurableRun{}).
 		Where(map[string]any{"RunID": j.RunID, "Status": graph.RUNNING, "LeaseToken": j.LeaseToken}).
 		Select("Result").Updates(&DurableRun{Result: resultOf(d)})
 	return res.RowsAffected == 1, res.Error

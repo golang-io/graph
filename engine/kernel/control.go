@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"reflect"
 	"strings"
 
 	"github.com/golang-io/graph"
@@ -36,8 +37,18 @@ func (st *state) onResume(ev Resume) error {
 		return &rejection{err: err}
 	}
 	t := st.task
+	var debug *engine.DebugOptions
+	if req.Debug != nil {
+		debug, _ = req.Debug.Normalize() // CheckDebug 已校验；比较规整后的值，避免 int / int64 假差异。
+	}
 	var targets []*engine.Run
 	for _, r := range st.list(graph.WAITING) {
+		// Controller 的一次访问尚未结束，旧进度必须继续使用原注入（含禁止删除旧注入）。
+		// 断点与单步仍可更新；只拒绝会改变进行中访问的注入替换。
+		if debug != nil && r.WaitReason == engine.WaitSubgraph &&
+			!reflect.DeepEqual(t.Policy.Debug.InjectFor(r.NodeID), debug.InjectFor(r.NodeID)) {
+			return reject(engine.ErrConflict, "cannot change debug inject for node %s while waiting for child tasks", r.NodeID)
+		}
 		if r.WaitReason == engine.WaitDebug && (req.TargetRunID == "" || r.RunID == req.TargetRunID) {
 			targets = append(targets, r)
 		}
@@ -49,7 +60,7 @@ func (st *state) onResume(ev Resume) error {
 		targets = targets[:min(1, len(targets))]
 	}
 	if req.Debug != nil {
-		t.Policy.Debug, _ = req.Debug.Normalize()
+		t.Policy.Debug = debug
 	}
 	switch action {
 	case engine.DebugActionStep:

@@ -21,6 +21,8 @@
 | `Debug` | object | 否 | 非空时替换 Task 的调试选项（`Step`、`Breakpoints`、`Injects`，见 [start-task](start-task.md#taskpolicy)）。传 `{}` 可清除全部断点与单步。 |
 | `TargetRunID` | string | 否 | 只放行指定的 Run。 |
 
+节点正在等待子 Task（`WAITING(subgraph)`）时，其本次访问的注入保持不变。替换 `Debug` 若修改或删除该节点已有注入，或为它增加注入，返回 `409 Conflict`，请求不产生状态改动；保留相同注入时可以更新断点和单步。更新仅针对尚未开始访问的节点时也不受此限制。
+
 ## 响应
 
 `202 Accepted`：`Receipt`，`Status` 为放行后 Task 的状态。Task 已结束（`SUCCEEDED` / `FAILED` / `CANCELED` / `SKIPPED`）时不报错，返回 `202` 与当前终态回执，不做任何修改。
@@ -32,7 +34,7 @@
 | 400 | `Invalid` | 未知键（含已删除的 `Input`）、`DebugAction` 取值非法、`Debug.Injects` 无法规整或不符合节点参数类型与校验规则 |
 | 400 | `Unsupported` | 引擎已关闭，或 durable 处于恢复模式 |
 | 404 | `NotFound` | Task 不存在（immediate 执行中的 Task 只能在执行它的进程内找到） |
-| 409 | `Conflict` | Task 未结束，但没有调试等待中的 Run 且未暂停（`DebugAction` 为空且提供了 `Debug` 时除外，此时只替换调试选项）；目标 Run 已不在等待 |
+| 409 | `Conflict` | Task 未结束，但没有调试等待中的 Run 且未暂停（`DebugAction` 为空且提供了 `Debug` 时除外，此时只替换调试选项）；目标 Run 已不在等待；`Debug` 替换改变了正在等待子 Task 的节点注入 |
 | 500 | `Internal` | 写入失败 |
 
 ## 示例

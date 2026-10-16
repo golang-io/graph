@@ -103,6 +103,24 @@ func Apply(reg *node.Registry, task *engine.Task, runs []*engine.Run, ev Event, 
 	if reg == nil {
 		return Changes{}, nil, fmt.Errorf("kernel: node registry required for task %s", task.TaskID)
 	}
+	// 先过滤过期事件，避免为最终无改动的回执复制所有 Run 与大块 Controller 状态。
+	switch ev := ev.(type) {
+	case Started:
+		if task.Status != graph.PENDING {
+			return Changes{}, nil, nil
+		}
+	case ActivityDone:
+		r := findRun(runs, ev.RunID)
+		if !ev.Current(r) || r.Status != graph.RUNNING {
+			return Changes{}, nil, nil
+		}
+	case ChildDone:
+		r := findRun(runs, ev.RunID)
+		if r == nil || r.Status != graph.WAITING || r.WaitReason != engine.WaitSubgraph ||
+			ev.ChildTaskID == "" || env.Awaiting[r.RunID][ev.Slot] != ev.ChildTaskID {
+			return Changes{}, nil, nil
+		}
+	}
 	st := newState(reg, task, runs, env)
 	var err error
 	switch ev := ev.(type) {
@@ -129,6 +147,15 @@ func Apply(reg *node.Registry, task *engine.Task, runs []*engine.Run, ev Event, 
 	}
 	ch, cmds := st.finish()
 	return ch, cmds, nil
+}
+
+func findRun(runs []*engine.Run, id string) *engine.Run {
+	for _, r := range runs {
+		if r != nil && r.RunID == id {
+			return r
+		}
+	}
+	return nil
 }
 
 // IsRejection 报告 Apply 的 error 是否为拒绝（控制事件前提不满足），而不是内核缺陷。
@@ -197,7 +224,8 @@ func newState(reg *node.Registry, task *engine.Task, runs []*engine.Run, env Env
 		if graph.IsTerminal(r.Status) {
 			st.runs[r.RunID] = r
 		} else {
-			st.runs[r.RunID] = cloneRunForState(r)
+			working := *r // State / Output 只读并整体替换；Outputs / Arrivals 写时复制。
+			st.runs[r.RunID] = &working
 		}
 	}
 	for runID, slots := range env.Awaiting {
@@ -207,32 +235,16 @@ func newState(reg *node.Registry, task *engine.Task, runs []*engine.Run, env Env
 	return st
 }
 
-// cloneTaskForState 复制 Task 供单次 Apply 内部修改状态，共享只读的 Graph 与 Input，避免每次推进深拷贝整张图。
+// cloneTaskForState 只复制状态字段与可修改 Step 的 Debug 外壳。
+// Graph、Input、Output、注入和断点在 Apply 内只读；结束时间也是整体替换，无需深复制。
 func cloneTaskForState(t *engine.Task) *engine.Task {
 	if t == nil {
 		return nil
 	}
 	out := *t
-	out.Policy.Debug = t.Policy.Debug.Clone()
-	out.Output = engine.CloneMap(t.Output)
-	if t.FinishedAt != nil {
-		at := *t.FinishedAt
-		out.FinishedAt = &at
-	}
-	return &out
-}
-
-// cloneRunForState 复制非终态 Run 的结构体供单次 Apply 推进；
-// Outputs 与 Arrivals 采用写时复制（仅在 Run 实际写入新输出或新到达分支时浅拷贝顶层 map），
-// 避免在单步推进时将全部未受影响并发分支的 Outputs / Arrivals 逐一复制。
-func cloneRunForState(r *engine.Run) *engine.Run {
-	if r == nil {
-		return nil
-	}
-	out := *r
-	out.Output = engine.CloneMap(r.Output)
-	if r.State != nil {
-		out.State = append([]byte(nil), r.State...)
+	if t.Policy.Debug != nil {
+		debug := *t.Policy.Debug
+		out.Policy.Debug = &debug
 	}
 	return &out
 }

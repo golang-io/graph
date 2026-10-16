@@ -106,6 +106,9 @@ func (r StartRequest) PinnedGraph() graph.Graph {
 //   - step：开启单步，只放行一个调试等待中的 Run
 //   - continue：关闭单步，放行全部调试等待中的 Run
 //
+// Debug 替换不能改变正在等待子 Task 的节点注入（含删除旧注入），否则返回 ErrConflict。
+// 进行中的 Controller 必须使用同一次访问开始时的输入与参数；断点和单步可照常更新。
+//
 // ResumeRequest resumes a paused task or Runs parked at debug gates.
 type ResumeRequest struct {
 	Debug       *DebugOptions `json:"Debug,omitempty"`       // 非空时替换 Task 的调试选项（如修改断点）

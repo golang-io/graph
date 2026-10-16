@@ -21,9 +21,6 @@ import (
 // 运行输入已由 NewTask / spawn 校验、规整并写入 Task.Input；不复制进 Run.Outputs，节点通过 $input 引用。
 func (st *state) onStarted() error {
 	t := st.task
-	if t.Status != graph.PENDING {
-		return nil
-	}
 	root := &engine.Run{
 		RunID: st.env.newID(), TaskID: t.TaskID, EngineKind: t.EngineKind,
 		Outputs: engine.Outputs{}, Status: graph.PENDING, CreatedAt: st.now,
@@ -38,9 +35,6 @@ func (st *state) onStarted() error {
 // 这同时覆盖了取消、any 汇合落选之后迟到的结果。
 func (st *state) onActivityDone(ev ActivityDone) error {
 	r := st.runs[ev.RunID]
-	if !ev.Current(r) || r.Status != graph.RUNNING {
-		return nil
-	}
 	n := st.c.node(r.NodeID)
 	out, err := ev.Output, ev.Err
 	if err == nil {
@@ -66,12 +60,6 @@ func (st *state) onActivityDone(ev ActivityDone) error {
 // 因此重复送达、迟到的结果都没有副作用。接收后从等待视图移除，记入 Changes.Released。
 func (st *state) onChildDone(ev ChildDone) error {
 	r := st.runs[ev.RunID]
-	if r == nil || r.Status != graph.WAITING || r.WaitReason != engine.WaitSubgraph {
-		return nil
-	}
-	if ev.ChildTaskID == "" || st.awaited(r.RunID)[ev.Slot] != ev.ChildTaskID {
-		return nil
-	}
 	st.unawait(r.RunID, ev.Slot)
 	r.WaitReason = ""
 	st.save(r)
