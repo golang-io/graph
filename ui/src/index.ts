@@ -8,6 +8,7 @@ export * from './endpoints'
 export * from './useGraphNodeCatalog'
 export * from './core-pack'
 export * from './types'
+export * from './inputs-split'
 export * from './run-overlay'
 export { GraphI18nProvider, useGraphI18n, type GraphTranslate } from './i18n'
 
