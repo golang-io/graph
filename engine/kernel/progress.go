@@ -71,7 +71,7 @@ func (st *state) onChildDone(ev ChildDone) error {
 			cev.Error = "subgraph " + strings.ToLower(string(ev.Status))
 		}
 	} else {
-		cev.Payload = maps.Clone(ev.Output)
+		cev.Payload = engine.CloneMap(ev.Output)
 		if cev.Payload == nil {
 			cev.Payload = map[string]any{}
 		}
@@ -262,10 +262,8 @@ func (st *state) checkOutput(n graph.Node, out node.NodeOutput) (node.NodeOutput
 
 // applyOutput 按 NodeOutput 推进：Effect 类由 applyEffect 处理；无输出且有子任务时继续等待；其余写入输出后沿 Endpoint 继续。
 func (st *state) applyOutput(r *engine.Run, n graph.Node, out node.NodeOutput) error {
-	if len(out.State) > 0 {
-		r.State = append(json.RawMessage(nil), out.State...)
-		st.save(r)
-	}
+	r.State = append(json.RawMessage(nil), out.State...)
+	st.save(r)
 	if out.Effect != nil {
 		return st.applyEffect(r, n, out.Effect)
 	}
@@ -381,7 +379,7 @@ func (st *state) ended(_ *engine.Run) error {
 	return nil
 }
 
-// finishTask 在全部可达分支执行完毕后汇总终态：收集所有真实完成 Finish 的终点 Run 输出（按 (FromEdgeID, RunID) 稳定浅合并），
+// finishTask 在全部可达分支执行完毕后汇总终态：收集所有真实完成 Finish 的 Run 输出（含提前结束，按 (FromEdgeID, RunID) 稳定浅合并），
 // 将 Task 置为 SUCCEEDED。
 func (st *state) finishTask() {
 	t := st.task
@@ -391,9 +389,7 @@ func (st *state) finishTask() {
 	var ends []*engine.Run
 	for _, r := range st.list(graph.SUCCEEDED) {
 		if r.Output != nil {
-			if ep, err := st.c.reg.NodeEndpoints(st.c.node(r.NodeID)); err == nil && ep.IsTerminal() {
-				ends = append(ends, r)
-			}
+			ends = append(ends, r)
 		}
 	}
 	slices.SortFunc(ends, func(x, y *engine.Run) int {

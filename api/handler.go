@@ -6,6 +6,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,11 +20,15 @@ import (
 	"github.com/golang-io/graph/service"
 )
 
-// Handler 构造承载图定义与 Task 控制面的 http.Handler；prefix 为可选路径前缀（如 /api）。
+// Handler 构造承载图定义与 Task 控制面的 http.Handler；prefix 为可选路径前缀（如 /api 或 api）。
 func Handler(rt *service.Runtime, prefix ...string) http.Handler {
 	var p string
 	if len(prefix) > 0 {
-		p = strings.TrimRight(strings.TrimSpace(prefix[0]), "/")
+		p = strings.TrimSpace(prefix[0])
+		if p != "" && !strings.HasPrefix(p, "/") {
+			p = "/" + p
+		}
+		p = strings.TrimRight(p, "/")
 	}
 	h := &handler{rt: rt}
 	mux := http.NewServeMux()
@@ -313,7 +318,10 @@ func (h *handler) watch(w http.ResponseWriter, r *http.Request) {
 		fail(w, fmt.Errorf("%w: streaming", engine.ErrUnsupported))
 		return
 	}
-	stream, err := h.rt.Engines.Watch(r.Context(), id)
+	watchCtx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	stream, err := h.rt.Engines.Watch(watchCtx, id)
 	if err != nil {
 		fail(w, err)
 		return
@@ -336,7 +344,7 @@ func (h *handler) watch(w http.ResponseWriter, r *http.Request) {
 			ev, err := stream.Recv()
 			select {
 			case ch <- item{ev, err}:
-			case <-r.Context().Done():
+			case <-watchCtx.Done():
 				return
 			}
 			if err != nil {
@@ -348,7 +356,7 @@ func (h *handler) watch(w http.ResponseWriter, r *http.Request) {
 	defer ping.Stop()
 	for {
 		select {
-		case <-r.Context().Done():
+		case <-watchCtx.Done():
 			return
 		case <-ping.C:
 			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {

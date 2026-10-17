@@ -35,7 +35,7 @@ func (k RunKey) IdempotencyKey() string {
 // Event describes why Control is being invoked for the current node visit.
 type Event struct {
 	Kind    string         `json:"Kind"`              // start | child_done
-	Payload map[string]any `json:"Payload,omitempty"` // child_done 时为子任务输出
+	Payload map[string]any `json:"Payload,omitempty"` // child_done 时为子任务输出的独立副本
 	Error   string         `json:"Error,omitempty"`   // child_done 时子任务的失败原因
 	Slot    string         `json:"Slot,omitempty"`    // child_done 时为该子任务启动时的 Spawn.Slot
 }
@@ -126,7 +126,7 @@ type Spawn struct {
 type NodeOutput struct {
 	Set      map[string]any  `json:"Set,omitempty"`
 	Endpoint string          `json:"Endpoint,omitempty"` // 本地出端点名；空表示默认 out
-	State    json.RawMessage `json:"State,omitempty"`    // Control 多轮协调时写回 Run.State；离开节点时清空
+	State    json.RawMessage `json:"State,omitempty"`    // Control 多轮协调时整体替换 Run.State；空值或离开节点时清空
 	Effect   *Effect         `json:"Effect,omitempty"`
 }
 

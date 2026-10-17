@@ -76,13 +76,17 @@ func (a *Activity) Run(ctx context.Context) (out node.NodeOutput, err error) {
 		ctx, cancel = context.WithTimeout(ctx, a.Timeout)
 		defer cancel()
 	}
-	return a.exec.Execute(ctx, node.NodeInput{
+	out, err = a.exec.Execute(ctx, node.NodeInput{
 		NodeID: a.Node.ID,
 		Vars:   a.Vars,
 		Params: a.Params,
 		Key:    a.Key,
 		Lookup: a.lookup,
 	})
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return node.NodeOutput{}, ctxErr
+	}
+	return out, err
 }
 
 // Done 用执行结果生成交回内核的 ActivityDone；RunID、Seq、Attempt 取自 Key，即准备调用时 Run 所在的执行。

@@ -190,12 +190,18 @@ func ValidateExprWith(src string, names []string) error {
 	if err != nil {
 		return err
 	}
+	var canonNames []string
+	if len(names) > 0 {
+		canonNames = slices.Clone(names)
+		slices.Sort(canonNames)
+		canonNames = slices.Compact(canonNames)
+	}
 	var bucket *validateWithBucket
 	if v, ok := validateExprWithCache.Load(src); ok {
 		bucket = v.(*validateWithBucket)
 		bucket.mu.RLock()
 		for i := range bucket.variants {
-			if slices.Equal(bucket.variants[i].names, names) {
+			if slices.Equal(bucket.variants[i].names, canonNames) {
 				cachedErr := bucket.variants[i].err
 				bucket.mu.RUnlock()
 				return cachedErr
@@ -207,8 +213,8 @@ func ValidateExprWith(src string, names []string) error {
 		bucket = actual.(*validateWithBucket)
 	}
 
-	env := make(types.Map, len(names))
-	for _, name := range names {
+	env := make(types.Map, len(canonNames))
+	for _, name := range canonNames {
 		env[name] = types.Any
 	}
 	var compileErr error
@@ -218,13 +224,13 @@ func ValidateExprWith(src string, names []string) error {
 
 	bucket.mu.Lock()
 	for i := range bucket.variants {
-		if slices.Equal(bucket.variants[i].names, names) {
+		if slices.Equal(bucket.variants[i].names, canonNames) {
 			cachedErr := bucket.variants[i].err
 			bucket.mu.Unlock()
 			return cachedErr
 		}
 	}
-	clonedNames := slices.Clone(names)
+	clonedNames := slices.Clone(canonNames)
 	if len(bucket.variants) < maxExprVariants {
 		bucket.variants = append(bucket.variants, validateWithVariant{names: clonedNames, err: compileErr})
 	} else {
@@ -246,7 +252,10 @@ func prepareExprSrc(src string) (string, error) {
 func normalizeExprSrc(src string) string {
 	src = strings.TrimSpace(src)
 	if strings.HasPrefix(src, "{{") && strings.HasSuffix(src, "}}") && len(src) >= 4 {
-		src = strings.TrimSpace(src[2 : len(src)-2])
+		inner := src[2 : len(src)-2]
+		if !strings.Contains(inner, "}}") {
+			src = strings.TrimSpace(inner)
+		}
 	}
 	return src
 }

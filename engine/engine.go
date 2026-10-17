@@ -113,7 +113,7 @@ func (r StartRequest) PinnedGraph() graph.Graph {
 type ResumeRequest struct {
 	Debug       *DebugOptions `json:"Debug,omitempty"`       // 非空时替换 Task 的调试选项（如修改断点）
 	DebugAction string        `json:"DebugAction,omitempty"` // "" | step | continue
-	TargetRunID string        `json:"TargetRunID,omitempty"` // 只放行指定 Run
+	TargetRunID string        `json:"TargetRunID,omitempty"` // 只放行指定的调试等待 Run；无匹配时返回 ErrConflict
 }
 
 // ResumeRequest.DebugAction 取值；空串表示普通恢复。

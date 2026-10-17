@@ -11,6 +11,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"fmt"
 	"io"
 	"math"
@@ -32,182 +34,76 @@ func Strict(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	encoded, err := json.Marshal(v)
+	encoded, err := jsonv2.Marshal(v, jsonv2.Deterministic(true))
 	if err != nil {
 		return nil, fmt.Errorf("graph: encode JSON: %w", err)
 	}
 	return encoded, nil
 }
 
-// CheckValid 按 Strict 规则直接在字节切片上校验 raw 是否为合法 JSON（拒绝空输入、重复 key、越界数字与尾随内容），
-// 不构造流式 json.Decoder，不分配中间值树。
+// CheckValid 按 Strict 规则在字节切片上校验 raw 是否为合法 JSON（拒绝空输入、重复 key、越界数字与尾随内容）。
 func CheckValid(raw []byte) error {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 {
 		return fmt.Errorf("graph: empty JSON")
 	}
-	if !json.Valid(raw) {
-		return fmt.Errorf("graph: invalid JSON")
-	}
-	_, err := checkValidValue(raw, 0)
-	return err
-}
-
-// checkValidValue 在已通过 json.Valid 语法校验的字节切片上检查对象重复键与数字有效范围。
-func checkValidValue(raw []byte, i int) (int, error) {
-	i = skipWS(raw, i)
-	switch raw[i] {
-	case '{':
-		i = skipWS(raw, i+1)
-		if raw[i] == '}' {
-			return i + 1, nil
-		}
-		var smallRaw [16][]byte
-		smallCount := 0
-		var seen map[string]struct{}
-		for {
-			keyStart := i
-			keyEnd, hasEsc := scanString(raw, keyStart)
-			if !hasEsc && seen == nil && smallCount < len(smallRaw) {
-				keyBytes := raw[keyStart+1 : keyEnd-1]
-				for k := range smallCount {
-					if bytes.Equal(smallRaw[k], keyBytes) {
-						return 0, fmt.Errorf("graph: duplicate JSON key")
-					}
+	dec := jsontext.NewDecoder(bytes.NewReader(raw))
+	topLevelRead := false
+	var depth int
+	for {
+		tok, err := dec.ReadToken()
+		if err != nil {
+			if err == io.EOF {
+				if !topLevelRead || depth != 0 {
+					return fmt.Errorf("graph: invalid JSON")
 				}
-				smallRaw[smallCount] = keyBytes
-				smallCount++
-			} else {
-				if seen == nil {
-					seen = make(map[string]struct{}, smallCount+4)
-					for k := range smallCount {
-						seen[string(smallRaw[k])] = struct{}{}
-					}
-				}
-				keyStr, err := decodeKeyString(raw[keyStart:keyEnd], hasEsc)
-				if err != nil {
-					return 0, err
-				}
-				if _, dup := seen[keyStr]; dup {
-					return 0, fmt.Errorf("graph: duplicate JSON key")
-				}
-				seen[keyStr] = struct{}{}
+				return nil
 			}
-			i = skipWS(raw, keyEnd)
-			i++ // ':'
-			var err error
-			i, err = checkValidValue(raw, i)
-			if err != nil {
-				return 0, err
-			}
-			i = skipWS(raw, i)
-			if raw[i] == '}' {
-				return i + 1, nil
-			}
-			i = skipWS(raw, i+1) // ','
+			return fmt.Errorf("graph: invalid JSON: %w", err)
 		}
-	case '[':
-		i = skipWS(raw, i+1)
-		if raw[i] == ']' {
-			return i + 1, nil
+		if topLevelRead && depth == 0 {
+			return fmt.Errorf("graph: trailing JSON value")
 		}
-		for {
-			var err error
-			i, err = checkValidValue(raw, i)
-			if err != nil {
-				return 0, err
+		switch tok.Kind() {
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+			if depth == 0 {
+				topLevelRead = true
 			}
-			i = skipWS(raw, i)
-			if raw[i] == ']' {
-				return i + 1, nil
+		case '0':
+			if err := checkNumberString(tok.String()); err != nil {
+				return err
 			}
-			i++ // ','
-		}
-	case '"':
-		end, _ := scanString(raw, i)
-		return end, nil
-	case 't', 'n':
-		return i + 4, nil
-	case 'f':
-		return i + 5, nil
-	default:
-		end := scanNumber(raw, i)
-		if err := checkNumberBytes(raw[i:end]); err != nil {
-			return 0, err
-		}
-		return end, nil
-	}
-}
-
-func skipWS(raw []byte, i int) int {
-	for i < len(raw) {
-		switch raw[i] {
-		case ' ', '\t', '\n', '\r':
-			i++
+			if depth == 0 {
+				topLevelRead = true
+			}
 		default:
-			return i
+			if depth == 0 {
+				topLevelRead = true
+			}
 		}
 	}
-	return i
 }
 
-// scanString 从 raw[i] == '"' 扫描到闭合引号之后的位置，并报告字符串内是否含转义符 '\\'。
-func scanString(raw []byte, i int) (end int, hasEscape bool) {
-	i++ // skip opening '"'
-	for i < len(raw) {
-		c := raw[i]
-		if c == '"' {
-			return i + 1, hasEscape
-		}
-		if c == '\\' {
-			hasEscape = true
-			i += 2
-			continue
-		}
-		i++
-	}
-	return i, hasEscape
-}
-
-func scanNumber(raw []byte, i int) int {
-	for i < len(raw) {
-		c := raw[i]
-		if (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E' {
-			i++
-			continue
-		}
-		break
-	}
-	return i
-}
-
-func decodeKeyString(quoted []byte, hasEsc bool) (string, error) {
-	if !hasEsc {
-		return string(quoted[1 : len(quoted)-1]), nil
-	}
-	var s string
-	if err := json.Unmarshal(quoted, &s); err != nil {
-		return "", fmt.Errorf("graph: invalid JSON")
-	}
-	return s, nil
-}
-
-func checkNumberBytes(src []byte) error {
+func checkNumberString(src string) error {
 	if len(src) > 64 {
 		return fmt.Errorf("graph: numeric literal out of range")
 	}
-	if !bytes.ContainsAny(src, ".eE") {
-		if _, err := strconv.ParseInt(string(src), 10, 64); err != nil {
+	if !strings.ContainsAny(src, ".eE") {
+		if _, err := strconv.ParseInt(src, 10, 64); err != nil {
 			return fmt.Errorf("graph: integer outside int64 range")
 		}
 		return nil
 	}
-	f, err := strconv.ParseFloat(string(src), 64)
+	f, err := strconv.ParseFloat(src, 64)
 	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
 		return fmt.Errorf("graph: non-finite JSON number")
 	}
 	if f == 0 {
-		for _, b := range src {
+		for i := 0; i < len(src); i++ {
+			b := src[i]
 			if b == 'e' || b == 'E' {
 				break
 			}
@@ -221,26 +117,105 @@ func checkNumberBytes(src []byte) error {
 
 // strictValue 按 Strict 的规则解出 JSON 值：对象为 map[string]any、数组为 []any，数字为归一化写法的 json.Number。
 func strictValue(raw []byte) (any, error) {
-	if len(bytes.TrimSpace(raw)) == 0 {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
 		return nil, fmt.Errorf("graph: empty JSON")
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	v, err := readJSONValue(dec)
+	dec := jsontext.NewDecoder(bytes.NewReader(trimmed))
+	v, err := readStrictJSONValue(dec)
 	if err != nil {
 		return nil, err
 	}
-	if _, err = dec.Token(); err != io.EOF {
+	if _, err = dec.ReadToken(); err != io.EOF {
 		return nil, fmt.Errorf("graph: trailing JSON value")
 	}
 	return v, nil
+}
+
+func readStrictJSONValue(dec *jsontext.Decoder) (any, error) {
+	tok, err := dec.ReadToken()
+	if err != nil {
+		return nil, fmt.Errorf("graph: invalid JSON: %w", err)
+	}
+	switch tok.Kind() {
+	case '{':
+		out := map[string]any{}
+		for dec.PeekKind() != '}' {
+			keyTok, err := dec.ReadToken()
+			if err != nil {
+				return nil, err
+			}
+			keyStr := keyTok.String()
+			val, err := readStrictJSONValue(dec)
+			if err != nil {
+				return nil, err
+			}
+			out[keyStr] = val
+		}
+		if _, err := dec.ReadToken(); err != nil {
+			return nil, err
+		}
+		return out, nil
+	case '[':
+		var out []any
+		for dec.PeekKind() != ']' {
+			val, err := readStrictJSONValue(dec)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, val)
+		}
+		if _, err := dec.ReadToken(); err != nil {
+			return nil, err
+		}
+		if out == nil {
+			return []any{}, nil
+		}
+		return out, nil
+	case '0':
+		text, err := normalizeNumber(tok.String())
+		if err != nil {
+			return nil, err
+		}
+		return json.Number(text), nil
+	case '"':
+		return tok.String(), nil
+	case 't':
+		return true, nil
+	case 'f':
+		return false, nil
+	case 'n':
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("graph: unsupported JSON token")
+	}
+}
+
+// normalizeNumber 归一化数字写法，并校验 int64 / float64 有效范围。
+func normalizeNumber(src string) (string, error) {
+	if len(src) > 64 {
+		return "", fmt.Errorf("graph: numeric literal out of range")
+	}
+	if !strings.ContainsAny(src, ".eE") {
+		n, err := strconv.ParseInt(src, 10, 64)
+		if err != nil {
+			return "", fmt.Errorf("graph: integer outside int64 range")
+		}
+		return strconv.FormatInt(n, 10), nil
+	}
+	f, err := strconv.ParseFloat(src, 64)
+	mantissa, _, _ := strings.Cut(strings.ToLower(src), "e")
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) || (f == 0 && strings.ContainsAny(mantissa, "123456789")) {
+		return "", fmt.Errorf("graph: non-finite JSON number")
+	}
+	return strconv.FormatFloat(f, 'g', -1, 64), nil
 }
 
 // Canonical 序列化结构体后再做严格规范化：同一内容总是得到同一串字节。
 func Canonical(v any) ([]byte, error) {
 	raw, err := json.Marshal(v)
 	if err != nil {
-		return nil, fmt.Errorf("graph: value is not JSON serializable")
+		return nil, fmt.Errorf("graph: value is not JSON serializable: %w", err)
 	}
 	return Strict(raw)
 }
@@ -321,85 +296,4 @@ func canonicalValueFast(v any) (any, bool) {
 	default:
 		return nil, false
 	}
-}
-
-// readJSONValue 逐个 token 读出一个 JSON 值：对象拒绝重复 key，数字归一化写法。
-func readJSONValue(dec *json.Decoder) (any, error) {
-	token, err := dec.Token()
-	if err != nil {
-		return nil, fmt.Errorf("graph: invalid JSON")
-	}
-	switch v := token.(type) {
-	case json.Delim:
-		switch v {
-		case '{':
-			out := map[string]any{}
-			for dec.More() {
-				keyToken, err := dec.Token()
-				if err != nil {
-					return nil, err
-				}
-				key, ok := keyToken.(string)
-				if !ok {
-					return nil, fmt.Errorf("graph: object key required")
-				}
-				if _, exists := out[key]; exists {
-					return nil, fmt.Errorf("graph: duplicate JSON key")
-				}
-				value, err := readJSONValue(dec)
-				if err != nil {
-					return nil, err
-				}
-				out[key] = value
-			}
-			end, err := dec.Token()
-			if err != nil || end != json.Delim('}') {
-				return nil, fmt.Errorf("graph: invalid object")
-			}
-			return out, nil
-		case '[':
-			out := []any{}
-			for dec.More() {
-				value, err := readJSONValue(dec)
-				if err != nil {
-					return nil, err
-				}
-				out = append(out, value)
-			}
-			end, err := dec.Token()
-			if err != nil || end != json.Delim(']') {
-				return nil, fmt.Errorf("graph: invalid array")
-			}
-			return out, nil
-		}
-	case json.Number:
-		text, err := normalizeNumber(string(v))
-		if err != nil {
-			return nil, err
-		}
-		return json.Number(text), nil
-	case nil, bool, string:
-		return v, nil
-	}
-	return nil, fmt.Errorf("graph: unsupported JSON token")
-}
-
-// normalizeNumber 归一化数字写法，并校验 int64 / float64 有效范围。
-func normalizeNumber(src string) (string, error) {
-	if len(src) > 64 {
-		return "", fmt.Errorf("graph: numeric literal out of range")
-	}
-	if !strings.ContainsAny(src, ".eE") {
-		n, err := strconv.ParseInt(src, 10, 64)
-		if err != nil {
-			return "", fmt.Errorf("graph: integer outside int64 range")
-		}
-		return strconv.FormatInt(n, 10), nil
-	}
-	f, err := strconv.ParseFloat(src, 64)
-	mantissa, _, _ := strings.Cut(strings.ToLower(src), "e")
-	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) || (f == 0 && strings.ContainsAny(mantissa, "123456789")) {
-		return "", fmt.Errorf("graph: non-finite JSON number")
-	}
-	return strconv.FormatFloat(f, 'g', -1, 64), nil
 }

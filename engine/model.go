@@ -172,8 +172,8 @@ type Run struct {
 	FromEdgeID string          `gorm:"column:FromEdgeID;size:64" json:"FromEdgeID,omitempty"`
 	Seq        int64           `gorm:"column:Seq" json:"Seq"`
 	Outputs    Outputs         `gorm:"column:Outputs;serializer:graphjson" json:"Outputs"`         // 本路径上各节点的输出
-	State      json.RawMessage `gorm:"column:State;serializer:graphjson" json:"State,omitempty"`   // 当前节点访问中 Execute 返回的状态
-	Output     map[string]any  `gorm:"column:Output;serializer:graphjson" json:"Output,omitempty"` // 到达 end 时的输出
+	State      json.RawMessage `gorm:"column:State;serializer:graphjson" json:"State,omitempty"`   // 当前节点访问中上一次 Control 返回的完整状态
+	Output     map[string]any  `gorm:"column:Output;serializer:graphjson" json:"Output,omitempty"` // 节点通过 Finish 结束 Run 时的输出
 
 	// Arrivals 记录 Merge(all) 节点已到达入边的节点输出（入边 ID → Outputs）。
 	Arrivals map[string]Outputs `gorm:"column:Arrivals;serializer:graphjson" json:"Arrivals,omitempty"`

@@ -136,6 +136,9 @@ func (MapNode) Control(_ context.Context, in node.ControlInput) (node.NodeOutput
 		return node.NodeOutput{}, err
 	}
 	cfg = NormalizeMapInput(cfg)
+	if cfg.Body == nil {
+		return node.NodeOutput{}, fmt.Errorf("map node %s: Body required", in.NodeID)
+	}
 	items, err := ParseMapItems(in.NodeID, in.Vars)
 	if err != nil {
 		return node.NodeOutput{}, err
@@ -242,7 +245,7 @@ func asAnySlice(v any) ([]any, error) {
 		return items, nil
 	}
 	rv := reflect.ValueOf(v)
-	if rv.Kind() != reflect.Slice {
+	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
 		return nil, fmt.Errorf("want array/slice, got %T", v)
 	}
 	out := make([]any, rv.Len())

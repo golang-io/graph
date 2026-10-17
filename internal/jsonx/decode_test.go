@@ -80,3 +80,35 @@ func TestCanonicalObject(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeStandardJSONWithWhitespace(t *testing.T) {
+	raw := []byte(`
+	{
+		"arr": [ 1 , 2 , 3 ],
+		"name": "graph" ,
+		"nested": { "id": 9007199254740993 } ,
+		"empty_obj": {  } ,
+		"empty_arr": [  ]
+	}
+	`)
+	var m map[string]any
+	if err := Decode(raw, &m); err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+	if m["name"] != "graph" {
+		t.Fatalf("name = %v", m["name"])
+	}
+	arr := m["arr"].([]any)
+	if len(arr) != 3 || arr[0] != int64(1) || arr[2] != int64(3) {
+		t.Fatalf("arr = %#v", arr)
+	}
+	nested := m["nested"].(map[string]any)
+	if nested["id"] != int64(9007199254740993) {
+		t.Fatalf("nested id = %#v (type %T)", nested["id"], nested["id"])
+	}
+
+	var anyVal any
+	if err := Decode(raw, &anyVal); err != nil {
+		t.Fatalf("Decode to any failed: %v", err)
+	}
+}

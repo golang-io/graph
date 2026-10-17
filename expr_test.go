@@ -127,6 +127,33 @@ func TestEvalExprWrapped(t *testing.T) {
 	numEq(t, v, 11)
 }
 
+func TestNormalizeExprSrcMultiHoles(t *testing.T) {
+	if got := normalizeExprSrc("{{a}} + {{b}}"); got != "{{a}} + {{b}}" {
+		t.Fatalf("got %q, want %q", got, "{{a}} + {{b}}")
+	}
+	if got := normalizeExprSrc("{{a}} == {{b}}"); got != "{{a}} == {{b}}" {
+		t.Fatalf("got %q, want %q", got, "{{a}} == {{b}}")
+	}
+	if got := normalizeExprSrc("  {{ a + b }}  "); got != "a + b" {
+		t.Fatalf("got %q, want %q", got, "a + b")
+	}
+	if got := normalizeExprSrc("{{}}"); got != "" {
+		t.Fatalf("got %q, want empty", got)
+	}
+}
+
+func TestValidateExprWithPermutationsAndDuplicates(t *testing.T) {
+	if err := ValidateExprWith("a + b", []string{"b", "a"}); err != nil {
+		t.Fatalf("expected valid: %v", err)
+	}
+	if err := ValidateExprWith("a + b", []string{"a", "b", "a"}); err != nil {
+		t.Fatalf("expected valid with duplicates: %v", err)
+	}
+	if err := ValidateExprWith("a + b + c", []string{"a", "b"}); err == nil {
+		t.Fatal("expected error for undeclared variable c")
+	}
+}
+
 func TestRenderTemplateExprHoles(t *testing.T) {
 	vars := map[string]any{
 		"name":  "Ada",

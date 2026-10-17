@@ -89,7 +89,7 @@ import {
 import { api } from './api'
 
 /** Task 终态：收到终态快照后关闭订阅。 */
-const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELED'])
+const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELED', 'SKIPPED'])
 
 type BottomTab = 'detail' | 'io' | 'list'
 
@@ -147,6 +147,8 @@ function statusBadgeClass(status: string): string {
     case 'FAILED':
     case 'CANCELED':
       return 'bg-rose-500/12 text-rose-700 ring-1 ring-rose-500/25 dark:bg-rose-500/20 dark:text-rose-300'
+    case 'SKIPPED':
+      return 'bg-slate-500/12 text-slate-600 ring-1 ring-slate-500/25 dark:bg-slate-500/20 dark:text-slate-400'
     case 'RUNNING':
       return 'bg-indigo-500/12 text-indigo-700 ring-1 ring-indigo-500/25 dark:bg-indigo-500/20 dark:text-indigo-300'
     case 'WAITING':
@@ -2018,7 +2020,7 @@ export default function RunView({ doc, pack, onSaved, workflowSelector }: Props)
             {panelOpen && bottomTab === 'list' ? (
               <>
                 <div className="flex items-center gap-1">
-                  {(['', 'SUCCEEDED', 'FAILED', 'RUNNING', 'WAITING'] as const).map((st) => (
+                  {(['', 'SUCCEEDED', 'FAILED', 'CANCELED', 'SKIPPED', 'RUNNING', 'WAITING'] as const).map((st) => (
                     <button
                       key={st || 'ALL'}
                       type="button"

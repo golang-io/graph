@@ -264,7 +264,7 @@ func (e *Engine) execute(j *job) (*batch, error) {
 	// 保存后恢复扫描可以直接应用结果，不必重新执行节点，此时才停止续租。
 	saved, err := e.saveResult(ctx, j, a.Done(out, runErr))
 	stop()
-	if e.life.Err() != nil {
+	if e.life.Err() != nil || errors.Is(err, context.Canceled) {
 		return nil, nil
 	}
 	if err != nil || !saved {

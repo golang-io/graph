@@ -230,6 +230,7 @@ func Run(t *testing.T, open OpenDB, build engine.Builder, opts ...Option) {
 		t.Run(mode, func(t *testing.T) { runAll(t, open, build, engine.TaskPolicy{ExecutionMode: mode}, c) })
 	}
 	t.Run("Ownership", func(t *testing.T) { runOwnership(t, open, build) })
+	t.Run("Core", func(t *testing.T) { runCore(t, open, build) })
 }
 
 func runAll(t *testing.T, open OpenDB, build engine.Builder, base engine.TaskPolicy, c *config) {

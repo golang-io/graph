@@ -114,3 +114,78 @@ func TestResultSaveLeaseBoundary(t *testing.T) {
 		})
 	}
 }
+
+type errorObserver struct {
+	mu   sync.Mutex
+	errs []error
+}
+
+func (o *errorObserver) TaskChanged(string) {}
+
+func (o *errorObserver) EngineError(err error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.errs = append(o.errs, err)
+}
+
+func TestResultSaveInterruptedOnCancel(t *testing.T) {
+	db := test.TempDB(t)
+	blocked := make(chan struct{})
+	var held atomic.Bool
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if err := db.Callback().Update().Before("gorm:begin_transaction").Register("test:hold_save_result", func(tx *gorm.DB) {
+		if tx.Error != nil || tx.Statement.Schema == nil || tx.Statement.Schema.Table != "tb_graph_run" || len(tx.Statement.Selects) != 1 || tx.Statement.Selects[0] != "Result" || !held.CompareAndSwap(false, true) {
+			return
+		}
+		close(blocked)
+		select {
+		case <-tx.Statement.Context.Done():
+		case <-ctx.Done():
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	work := enginetest.FuncNode{NodeSpec: node.WithParams(node.NodeSpec{ID: "work", Name: "work", Endpoints: node.DefaultEndpoints()}, struct{}{}),
+		Exec: func(context.Context, node.NodeInput) (node.NodeOutput, error) {
+			return node.Continue(nil, ""), nil
+		},
+	}
+	reg, err := enginetest.Registry(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obs := &errorObserver{}
+	e, err := durable.With(durable.Options{Workers: 1, LeaseDuration: time.Second, PollInterval: 5 * time.Millisecond})(ctx, engine.EngineConfig{DB: db, Nodes: reg, Observer: obs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		closeCtx, done := context.WithTimeout(context.Background(), 2*time.Second)
+		defer done()
+		_ = e.Close(closeCtx)
+	}()
+
+	g := enginetest.G([]graph.Node{enginetest.N("work", "work", nil), enginetest.N("finish", builtin.End, nil)}, enginetest.E("work", "finish"))
+	rec, err := e.Start(ctx, engine.StartRequest{Graph: g})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-blocked:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+
+	if _, err := e.Signal(ctx, rec.TaskID, engine.Signal{Kind: engine.SignalCancel, Reason: "canceled during save"}); err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, e, rec.TaskID, graph.CANCELED)
+
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+	for _, err := range obs.errs {
+		t.Errorf("unexpected engine error: %v", err)
+	}
+}

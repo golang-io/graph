@@ -19,7 +19,7 @@
 | --- | --- | --- | --- |
 | `DebugAction` | string | 否 | 空：清除暂停，放行所有调试等待中的 Run；`step`：开启单步并放行一个调试等待中的 Run；`continue`：关闭单步并放行所有调试等待中的 Run。 |
 | `Debug` | object | 否 | 非空时替换 Task 的调试选项（`Step`、`Breakpoints`、`Injects`，见 [start-task](start-task.md#taskpolicy)）。传 `{}` 可清除全部断点与单步。 |
-| `TargetRunID` | string | 否 | 只放行指定的 Run。 |
+| `TargetRunID` | string | 否 | 只放行指定的调试等待 Run（无匹配或未处于调试等待时返回 `409 Conflict`）。 |
 
 节点正在等待子 Task（`WAITING(subgraph)`）时，其本次访问的注入保持不变。替换 `Debug` 若修改或删除该节点已有注入，或为它增加注入，返回 `409 Conflict`，请求不产生状态改动；保留相同注入时可以更新断点和单步。更新仅针对尚未开始访问的节点时也不受此限制。
 

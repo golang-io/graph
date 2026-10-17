@@ -53,6 +53,9 @@ func (st *state) onResume(ev Resume) error {
 			targets = append(targets, r)
 		}
 	}
+	if req.TargetRunID != "" && len(targets) == 0 {
+		return reject(engine.ErrConflict, "target run is not paused for debugging")
+	}
 	if len(targets) == 0 && !t.Paused && (action != "" || req.Debug == nil) {
 		return reject(engine.ErrConflict, "no run is paused for debugging")
 	}

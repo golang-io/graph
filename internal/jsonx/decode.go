@@ -3,6 +3,9 @@ package jsonx
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -29,8 +32,8 @@ func decodeKeepingInts(raw []byte, target any) error {
 	case *any:
 		if p != nil {
 			trimmed := bytes.TrimSpace(raw)
-			if len(trimmed) > 0 && json.Valid(trimmed) {
-				v, _, err := parseValidAny(trimmed, 0)
+			if len(trimmed) > 0 && jsontext.Value(trimmed).IsValid() {
+				v, err := parseValidDynamic(trimmed)
 				if err != nil {
 					return err
 				}
@@ -41,8 +44,8 @@ func decodeKeepingInts(raw []byte, target any) error {
 	case *map[string]any:
 		if p != nil {
 			trimmed := bytes.TrimSpace(raw)
-			if len(trimmed) > 0 && (trimmed[0] == '{' || bytes.Equal(trimmed, []byte("null"))) && json.Valid(trimmed) {
-				v, _, err := parseValidAny(trimmed, 0)
+			if len(trimmed) > 0 && (trimmed[0] == '{' || bytes.Equal(trimmed, []byte("null"))) && jsontext.Value(trimmed).IsValid() {
+				v, err := parseValidDynamic(trimmed)
 				if err != nil {
 					return err
 				}
@@ -56,7 +59,7 @@ func decodeKeepingInts(raw []byte, target any) error {
 		}
 	}
 	if !containsDigit(raw) || !targetHasInterface(target) {
-		return json.Unmarshal(raw, target)
+		return jsonv2.Unmarshal(raw, target)
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
@@ -64,6 +67,75 @@ func decodeKeepingInts(raw []byte, target any) error {
 		return err
 	}
 	return NormalizeNumbers(target)
+}
+
+func parseValidDynamic(raw []byte) (any, error) {
+	dec := jsontext.NewDecoder(bytes.NewReader(raw))
+	return parseDynamicValue(dec)
+}
+
+func parseDynamicValue(dec *jsontext.Decoder) (any, error) {
+	tok, err := dec.ReadToken()
+	if err != nil {
+		return nil, err
+	}
+	switch tok.Kind() {
+	case '{':
+		m := map[string]any{}
+		for dec.PeekKind() != '}' {
+			keyTok, err := dec.ReadToken()
+			if err != nil {
+				return nil, err
+			}
+			keyStr := keyTok.String()
+			val, err := parseDynamicValue(dec)
+			if err != nil {
+				return nil, err
+			}
+			m[keyStr] = val
+		}
+		if _, err := dec.ReadToken(); err != nil { // consume '}'
+			return nil, err
+		}
+		return m, nil
+	case '[':
+		arr := make([]any, 0, 4)
+		for dec.PeekKind() != ']' {
+			val, err := parseDynamicValue(dec)
+			if err != nil {
+				return nil, err
+			}
+			arr = append(arr, val)
+		}
+		if _, err := dec.ReadToken(); err != nil { // consume ']'
+			return nil, err
+		}
+		return arr, nil
+	case '"':
+		return tok.String(), nil
+	case 't':
+		return true, nil
+	case 'f':
+		return false, nil
+	case 'n':
+		return nil, nil
+	case '0':
+		s := tok.String()
+		if !strings.ContainsAny(s, ".eE") {
+			n, err := strconv.ParseInt(s, 10, 64)
+			if err != nil {
+				return nil, err
+			}
+			return n, nil
+		}
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return nil, err
+		}
+		return f, nil
+	default:
+		return nil, fmt.Errorf("graph: invalid JSON token")
+	}
 }
 
 func containsDigit(raw []byte) bool {
@@ -121,82 +193,6 @@ func checkTypeHasInterface(t reflect.Type, visited map[reflect.Type]bool) bool {
 		return false
 	default:
 		return false
-	}
-}
-
-// parseValidAny 在已通过 json.Valid 的字节切片上直接解析出动态值（整数为 int64，小数为 float64），不分配流式 Decoder。
-func parseValidAny(raw []byte, i int) (any, int, error) {
-	i = skipWS(raw, i)
-	switch raw[i] {
-	case '{':
-		i = skipWS(raw, i+1)
-		out := map[string]any{}
-		if raw[i] == '}' {
-			return out, i + 1, nil
-		}
-		for {
-			keyStart := i
-			keyEnd, hasEsc := scanString(raw, keyStart)
-			keyStr, err := decodeKeyString(raw[keyStart:keyEnd], hasEsc)
-			if err != nil {
-				return nil, 0, err
-			}
-			i = skipWS(raw, keyEnd)
-			i++ // ':'
-			val, next, err := parseValidAny(raw, i)
-			if err != nil {
-				return nil, 0, err
-			}
-			out[keyStr] = val
-			i = skipWS(raw, next)
-			if raw[i] == '}' {
-				return out, i + 1, nil
-			}
-			i = skipWS(raw, i+1) // ','
-		}
-	case '[':
-		i = skipWS(raw, i+1)
-		if raw[i] == ']' {
-			return []any{}, i + 1, nil
-		}
-		out := make([]any, 0, 4)
-		for {
-			val, next, err := parseValidAny(raw, i)
-			if err != nil {
-				return nil, 0, err
-			}
-			out = append(out, val)
-			i = skipWS(raw, next)
-			if raw[i] == ']' {
-				return out, i + 1, nil
-			}
-			i++ // ','
-		}
-	case '"':
-		end, hasEsc := scanString(raw, i)
-		s, err := decodeKeyString(raw[i:end], hasEsc)
-		return s, end, err
-	case 't':
-		return true, i + 4, nil
-	case 'f':
-		return false, i + 5, nil
-	case 'n':
-		return nil, i + 4, nil
-	default:
-		end := scanNumber(raw, i)
-		num := raw[i:end]
-		if !bytes.ContainsAny(num, ".eE") {
-			n, err := strconv.ParseInt(string(num), 10, 64)
-			if err != nil {
-				return nil, 0, err
-			}
-			return n, end, nil
-		}
-		f, err := strconv.ParseFloat(string(num), 64)
-		if err != nil {
-			return nil, 0, err
-		}
-		return f, end, nil
 	}
 }
 

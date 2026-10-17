@@ -156,11 +156,21 @@ func TestAPIBreakpointResumeAndCancel(t *testing.T) {
 	}
 }
 
-// TestAPIServicePrefix 确认前缀 /api/graph 下路由完整可用。
+// TestAPIServicePrefix 确认各种前缀格式（带或不带前导斜杠、尾随斜杠）下路由完整可用。
 func TestAPIServicePrefix(t *testing.T) {
+	for _, prefix := range []string{"/api/graph", "api/graph", "api", "api/", "/api/", "  api  "} {
+		t.Run(prefix, func(t *testing.T) {
+			rt := startTestRuntime(t)
+			cleanPrefix := "/" + strings.Trim(strings.TrimSpace(prefix), "/")
+			if cleanPrefix == "/" {
+				cleanPrefix = ""
+			}
+			c := client{t: t, h: api.Handler(rt, prefix), p: cleanPrefix}
+			c.call(http.MethodGet, "/graphs", "", http.StatusOK, nil)
+			c.call(http.MethodGet, "/engines", "", http.StatusOK, nil)
+		})
+	}
 	c := newClient(t, startTestRuntime(t), "/api/graph")
-	c.call(http.MethodGet, "/graphs", "", http.StatusOK, nil)
-	c.call(http.MethodGet, "/engines", "", http.StatusOK, nil)
 	var rec engine.Receipt
 	c.call(http.MethodPost, "/tasks", `{"GraphID":"demo_tour","Engine":"immediate","Input":{"name":"Ada","score":40,"items":["a"]}}`, http.StatusAccepted, &rec)
 	c.waitTask(rec.TaskID, graph.SUCCEEDED)
